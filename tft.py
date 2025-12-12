@@ -54,7 +54,7 @@ WHY ALL THREE DATASETS FOR TFT?
 - Google Trends adds consumer intent signal
 - Model can discover complex interactions
 
-NOTE: This is a SIMPLIFIED version of TFT. The full architecture has more
+This is a SIMPLIFIED version of TFT. The full architecture has more
 components (gating mechanisms, multi-head attention, etc.) but the core
 concepts remain the same.
 """
@@ -71,9 +71,7 @@ from typing import Dict, Tuple, List
 import warnings
 warnings.filterwarnings('ignore')
 
-# Set device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 
 class VariableSelectionNetwork(nn.Module):
     """
@@ -96,11 +94,9 @@ class VariableSelectionNetwork(nn.Module):
         super().__init__()
         
         self.input_size = input_size
-        
-        # Feature-wise processing
+   
         self.feature_transform = nn.Linear(input_size, hidden_size)
-        
-        # Softmax for variable selection weights
+
         self.weight_network = nn.Sequential(
             nn.Linear(input_size, hidden_size),
             nn.ReLU(),
@@ -115,14 +111,10 @@ class VariableSelectionNetwork(nn.Module):
         x shape: (batch, seq_len, input_size)
         returns: (batch, seq_len, hidden_size), weights
         """
-        # Compute variable selection weights
-        # Shape: (batch, seq_len, input_size)
         weights = self.weight_network(x)
-        
-        # Apply weights to input
+
         weighted_x = x * weights
-        
-        # Transform to hidden size
+
         output = self.feature_transform(weighted_x)
         output = self.dropout(output)
         
@@ -156,12 +148,10 @@ class TemporalAttention(nn.Module):
         
         assert hidden_size % num_heads == 0, "hidden_size must be divisible by num_heads"
         
-        # Linear projections for Q, K, V
         self.query = nn.Linear(hidden_size, hidden_size)
         self.key = nn.Linear(hidden_size, hidden_size)
         self.value = nn.Linear(hidden_size, hidden_size)
         
-        # Output projection
         self.output = nn.Linear(hidden_size, hidden_size)
         
         self.dropout = nn.Dropout(dropout)
@@ -174,41 +164,28 @@ class TemporalAttention(nn.Module):
         """
         batch_size, seq_len, _ = x.shape
         
-        # Compute Q, K, V
         Q = self.query(x)  # (batch, seq, hidden)
         K = self.key(x)
         V = self.value(x)
         
-        # Reshape for multi-head attention
-        # (batch, seq, num_heads, head_dim) -> (batch, num_heads, seq, head_dim)
         Q = Q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         K = K.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         V = V.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         
-        # Compute attention scores
-        # (batch, heads, seq, head_dim) @ (batch, heads, head_dim, seq) -> (batch, heads, seq, seq)
         scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
         
-        # Apply mask if provided (for causal attention)
         if mask is not None:
             scores = scores.masked_fill(mask == 0, -1e9)
-        
-        # Softmax to get attention weights
+
         attention_weights = torch.softmax(scores, dim=-1)
         attention_weights = self.dropout(attention_weights)
         
-        # Apply attention to values
-        # (batch, heads, seq, seq) @ (batch, heads, seq, head_dim) -> (batch, heads, seq, head_dim)
         attended = torch.matmul(attention_weights, V)
         
-        # Reshape back
-        # (batch, heads, seq, head_dim) -> (batch, seq, heads, head_dim) -> (batch, seq, hidden)
         attended = attended.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
-        
-        # Output projection
+   
         output = self.output(attended)
         
-        # Return average attention weights across heads for interpretability
         avg_attention = attention_weights.mean(dim=1)
         
         return output, avg_attention
@@ -249,11 +226,9 @@ class SimplifiedTFT(nn.Module):
         
         self.input_size = input_size
         self.hidden_size = hidden_size
-        
-        # 1. Variable Selection
+  
         self.var_selection = VariableSelectionNetwork(input_size, hidden_size, dropout)
-        
-        # 2. LSTM Encoder for local patterns
+      
         self.lstm = nn.LSTM(
             input_size=hidden_size,
             hidden_size=hidden_size,
@@ -262,20 +237,16 @@ class SimplifiedTFT(nn.Module):
             dropout=dropout if lstm_layers > 1 else 0
         )
         
-        # 3. Self-Attention for global patterns
         self.attention = TemporalAttention(hidden_size, attention_heads, dropout)
         
-        # 4. Layer normalization (stabilizes training)
         self.layer_norm1 = nn.LayerNorm(hidden_size)
         self.layer_norm2 = nn.LayerNorm(hidden_size)
         
-        # 5. Output layers
         self.dropout = nn.Dropout(dropout)
         self.fc1 = nn.Linear(hidden_size, 32)
         self.fc2 = nn.Linear(32, 1)
         self.relu = nn.ReLU()
-        
-        # Store attention weights for interpretability
+
         self.feature_weights = None
         self.attention_weights = None
     
@@ -286,29 +257,23 @@ class SimplifiedTFT(nn.Module):
         x shape: (batch, seq_len, input_size)
         returns: predictions (batch,)
         """
-        # 1. Variable Selection
         selected, feature_weights = self.var_selection(x)
         self.feature_weights = feature_weights
-        
-        # 2. LSTM encoding
+  
         lstm_out, _ = self.lstm(selected)
         lstm_out = self.layer_norm1(lstm_out + selected)  # Residual connection
-        
-        # 3. Self-Attention
+       
         attended, attention_weights = self.attention(lstm_out)
         self.attention_weights = attention_weights
         attended = self.layer_norm2(attended + lstm_out)  # Residual connection
-        
-        # 4. Take last time step
+
         final = attended[:, -1, :]
-        
-        # 5. Dense layers for prediction
+   
         out = self.dropout(final)
         out = self.relu(self.fc1(out))
         out = self.fc2(out)
         
         return out.squeeze()
-
 
 class TFTForecaster:
     """
@@ -366,24 +331,20 @@ class TFTForecaster:
               verbose: bool = True) -> 'TFTForecaster':
         """Train the TFT model."""
         self.feature_names = list(X_train.columns)
-        
-        # Prepare data
+   
         X_train_seq, y_train_seq = self.prepare_data(X_train, y_train, fit_scalers=True)
         
         if X_val is not None:
             X_val_seq, y_val_seq = self.prepare_data(X_val, y_val, fit_scalers=False)
             X_val_tensor = torch.FloatTensor(X_val_seq).to(device)
             y_val_tensor = torch.FloatTensor(y_val_seq).to(device)
-        
-        # Convert to tensors
+     
         X_train_tensor = torch.FloatTensor(X_train_seq).to(device)
         y_train_tensor = torch.FloatTensor(y_train_seq).to(device)
-        
-        # Create DataLoader
+    
         train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
         train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
         
-        # Initialize model
         self.model = SimplifiedTFT(
             input_size=X_train.shape[1],
             hidden_size=self.hidden_size,
@@ -391,15 +352,13 @@ class TFTForecaster:
             attention_heads=self.attention_heads,
             dropout=self.dropout
         ).to(device)
-        
-        # Training setup
+
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=10, verbose=False
+            optimizer, mode='min', factor=0.5, patience=10
         )
-        
-        # Training loop
+
         self.training_losses = []
         
         for epoch in range(self.epochs):
@@ -416,8 +375,7 @@ class TFTForecaster:
             
             avg_loss = epoch_loss / len(train_loader)
             self.training_losses.append(avg_loss)
-            
-            # Learning rate scheduling
+
             if X_val is not None:
                 self.model.eval()
                 with torch.no_grad():
@@ -495,8 +453,7 @@ class TFTForecaster:
         with torch.no_grad():
             _ = self.model(X_tensor)
             weights = self.model.feature_weights.cpu().numpy()
-        
-        # Average weights across batch and time
+      
         avg_weights = weights.mean(axis=(0, 1))
         
         return pd.DataFrame({
@@ -525,7 +482,6 @@ class TFTForecaster:
         plt.show()
         
         return importance_df
-
 
 def train_and_evaluate_tft(split_data: Dict,
                           model_name: str = "TFT",
@@ -576,7 +532,6 @@ def train_and_evaluate_tft(split_data: Dict,
         'X_test': X_test
     }
 
-
 def plot_tft_predictions(results: Dict, train_y: pd.Series,
                         train_dates: pd.DatetimeIndex,
                         title: str = None, save_path: str = None):
@@ -608,24 +563,22 @@ def plot_tft_predictions(results: Dict, train_y: pd.Series,
 # ============================================================
 if __name__ == "__main__":
     import os
-    from stage1_data_loading import load_all_data
-    from stage3_feature_engineering import prepare_all_model_features
-    from stage4_train_test_split import prepare_all_splits
+    from load_data import load_all_data
+    from feature_eng import prepare_all_model_features
+    from train_test import prepare_all_splits
     
     os.makedirs('plots', exist_ok=True)
     print(f"Using device: {device}")
-    
-    # Load and prepare data
+ 
     data = load_all_data(
-        sfs_path='trend_counts_over_time.csv',
-        google_path='google_trends.csv',
-        weather_path='California_weather.csv'
+        sfs_path='data/trend_counts_over_time.csv',
+        google_path='data/google_trends.csv',
+        weather_path='data/California_weather.csv'
     )
     
     feature_datasets = prepare_all_model_features(data['sfs'], data['google'], data['weather'])
     splits = prepare_all_splits(feature_datasets, data['sfs'], train_fraction=0.75, visualize=False)
-    
-    # Train TFT for Zara
+
     zara_results = train_and_evaluate_tft(
         splits['zara_tft'],
         model_name="Zara TFT (SFS + Google + Weather)",
@@ -642,7 +595,6 @@ if __name__ == "__main__":
         title='Zara Dress: TFT Feature Importance', save_path='plots/zara_tft_importance.png'
     )
     
-    # Train TFT for Chanel
     chanel_results = train_and_evaluate_tft(
         splits['chanel_tft'],
         model_name="Chanel TFT (SFS + Google + Weather)",
