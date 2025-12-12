@@ -1,6 +1,5 @@
 """
-Stage 2: Exploratory Data Analysis (EDA)
-=========================================
+Exploratory Data Analysis (EDA)
 
 This module performs visual and statistical exploration of the data
 to understand patterns, relationships, and characteristics.
@@ -24,7 +23,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from stage1_data_loading import load_all_data
+from load_data import load_all_data
 
 # Set plotting style
 plt.style.use('seaborn-v0_8-whitegrid')
