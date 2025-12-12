@@ -1,6 +1,5 @@
 """
-Stage 3: Feature Engineering
-=============================
+Feature Engineering
 
 This module creates features (input variables) for machine learning models.
 
@@ -142,15 +141,12 @@ def create_rolling_features(df: pd.DataFrame,
     result = df.copy()
     
     for window in windows:
-        # Rolling mean - average over window
         result[f'{column}_rolling_mean_{window}'] = \
             result[column].rolling(window=window, min_periods=1).mean()
-        
-        # Rolling standard deviation - volatility
+
         result[f'{column}_rolling_std_{window}'] = \
             result[column].rolling(window=window, min_periods=1).std()
-        
-        # Rolling min and max - range
+   
         result[f'{column}_rolling_min_{window}'] = \
             result[column].rolling(window=window, min_periods=1).min()
         
@@ -205,11 +201,9 @@ def create_momentum_features(df: pd.DataFrame,
     result = df.copy()
     
     for period in periods:
-        # Absolute difference (momentum)
         result[f'{column}_momentum_{period}'] = \
             result[column] - result[column].shift(period)
         
-        # Percentage change
         result[f'{column}_pct_change_{period}'] = \
             result[column].pct_change(periods=period)
     
@@ -290,10 +284,9 @@ def create_all_time_series_features(df: pd.DataFrame,
     --------
     DataFrame with all features
     """
-    # Start with original data
     result = df[[target_column]].copy()
     
-    # Add each feature type
+
     result = create_lag_features(result, target_column, lags)
     result = create_rolling_features(result, target_column, rolling_windows)
     result = create_momentum_features(result, target_column, momentum_periods)
@@ -343,11 +336,9 @@ def add_google_trends_features(df: pd.DataFrame,
     """
     result = df.copy()
     
-    # Join Google data
     result = result.join(google_df[[google_column]], how='left')
     result = result.rename(columns={google_column: f'{trend_column}_search_interest'})
-    
-    # Create lagged versions
+
     for lag in lags:
         if lag > 0:  # lag_0 is the original column
             result[f'{trend_column}_search_lag_{lag}'] = \
@@ -397,13 +388,10 @@ def add_weather_features(df: pd.DataFrame,
     """
     result = df.copy()
     
-    # Select key weather columns
     weather_cols = ['avg_temperature', 'avg_humidity', 'total_rainfall']
     
-    # Join weather data
     result = result.join(weather_df[weather_cols], how='left')
     
-    # Create lagged versions
     for col in weather_cols:
         for lag in lags:
             if lag > 0:
@@ -493,8 +481,7 @@ def prepare_features_for_lstm(sfs_df: pd.DataFrame,
     DataFrame ready for LSTM
     """
     print(f"\nPreparing LSTM features for {target_column}...")
-    
-    # Start with SFS features
+   
     features = create_all_time_series_features(
         sfs_df[[target_column]], 
         target_column,
@@ -502,8 +489,7 @@ def prepare_features_for_lstm(sfs_df: pd.DataFrame,
         rolling_windows=[3, 6, 12],
         momentum_periods=[1, 3, 6]
     )
-    
-    # Add Google Trends features
+
     trend_name = target_column.replace('_frequency', '')
     features = add_google_trends_features(
         features, google_df, 
@@ -559,8 +545,7 @@ def prepare_features_for_tft(sfs_df: pd.DataFrame,
     DataFrame ready for TFT
     """
     print(f"\nPreparing TFT features for {target_column}...")
-    
-    # Start with SFS features
+
     features = create_all_time_series_features(
         sfs_df[[target_column]], 
         target_column,
@@ -568,8 +553,7 @@ def prepare_features_for_tft(sfs_df: pd.DataFrame,
         rolling_windows=[3, 6, 12],
         momentum_periods=[1, 3, 6]
     )
-    
-    # Add Google Trends features
+
     trend_name = target_column.replace('_frequency', '')
     features = add_google_trends_features(
         features, google_df, 
@@ -577,7 +561,6 @@ def prepare_features_for_tft(sfs_df: pd.DataFrame,
         lags=[0, 1, 2, 3]
     )
     
-    # Add Weather features
     features = add_weather_features(
         features, weather_df,
         lags=[0, 1, 2]
@@ -617,8 +600,7 @@ def prepare_all_model_features(sfs_df: pd.DataFrame,
     print("=" * 60)
     
     datasets = {}
-    
-    # ZARA DRESS
+
     print("\n--- ZARA DRESS ---")
     datasets['zara_xgb'] = prepare_features_for_xgboost(
         sfs_df, 'zara_frequency'
@@ -629,8 +611,7 @@ def prepare_all_model_features(sfs_df: pd.DataFrame,
     datasets['zara_tft'] = prepare_features_for_tft(
         sfs_df, google_df, weather_df, 'zara_frequency', 'zara_search_interest'
     )
-    
-    # CHANEL BAG
+  
     print("\n--- CHANEL BAG ---")
     datasets['chanel_xgb'] = prepare_features_for_xgboost(
         sfs_df, 'chanel_frequency'
@@ -641,8 +622,7 @@ def prepare_all_model_features(sfs_df: pd.DataFrame,
     datasets['chanel_tft'] = prepare_features_for_tft(
         sfs_df, google_df, weather_df, 'chanel_frequency', 'chanel_search_interest'
     )
-    
-    # Summary
+
     print("\n" + "=" * 60)
     print("FEATURE PREPARATION SUMMARY")
     print("=" * 60)
@@ -656,23 +636,20 @@ def prepare_all_model_features(sfs_df: pd.DataFrame,
 # MAIN - Run this file to test feature engineering
 # ============================================================
 if __name__ == "__main__":
-    from stage1_data_loading import load_all_data
+    from load_data import load_all_data
     
-    # Load data
     data = load_all_data(
-        sfs_path='trend_counts_over_time.csv',
-        google_path='google_trends.csv',
-        weather_path='California_weather.csv'
+        sfs_path='data/trend_counts_over_time.csv',
+        google_path='data/google_trends.csv',
+        weather_path='data/California_weather.csv'
     )
-    
-    # Prepare all features
+  
     feature_datasets = prepare_all_model_features(
         data['sfs'],
         data['google'],
         data['weather']
     )
-    
-    # Show sample
+
     print("\n\nSample of Zara XGBoost features:")
     print(feature_datasets['zara_xgb'].head(15))
     
