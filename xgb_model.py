@@ -398,6 +398,13 @@ if __name__ == "__main__":
         save_path='plots/zara_xgb_importance.png'
     )
     
+    # Debug: Check for inf values
+    import numpy as np
+    X_train = splits['chanel_xgb']['X_train']
+    inf_mask = np.isinf(X_train)
+    print(f"Total inf values: {inf_mask.sum().sum()}")
+    print(f"Columns with inf: {X_train.columns[inf_mask.any()].tolist()}")
+    
     chanel_results = train_and_evaluate_xgboost(
         splits['chanel_xgb'], model_name="Chanel XGBoost (SFS only)"
     )
