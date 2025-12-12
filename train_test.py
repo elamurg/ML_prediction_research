@@ -1,6 +1,5 @@
 """
-Stage 4: Train/Test Split for Time Series
-==========================================
+Train/Test Split for Time Series
 
 This module handles the crucial task of splitting time series data
 for training and testing while avoiding data leakage.
@@ -18,11 +17,11 @@ RIGHT WAY (Temporal Split):
     Split chronologically - train on past, test on future.
     This simulates real-world forecasting conditions.
 
-YOUR RESEARCH DESIGN:
+MY RESEARCH DESIGN:
     Train: Introduction + Growth phases (before peak)
     Test: Saturation + Decline phases (after split point)
     
-    This tests if models can predict the decline after only seeing growth!
+    This tests if models can predict the decline after only seeing growth.
 """
 
 import pandas as pd
@@ -60,66 +59,24 @@ def find_peak_date(df: pd.DataFrame, target_column: str) -> pd.Timestamp:
     return peak_date
 
 
-def calculate_split_point(df: pd.DataFrame, 
-                          target_column: str, 
-                          train_fraction: float = 0.75) -> pd.Timestamp:
+def calculate_split_at_peak(df: pd.DataFrame, target_column: str) -> pd.Timestamp:
     """
-    Calculate the train/test split point based on lifecycle position.
+    Split exactly at the peak - train on growth phase, test on decline.
     
-    SPLIT STRATEGY:
-    ---------------
-    We want to train on the growth phase and test on saturation/decline.
-    
-    If train_fraction = 0.75:
-    - Training uses the first 75% of data up to the peak
-    - Testing uses everything after the split point
-    
-    Example:
-        Data: 100 months total
-        Peak at month 80
-        Split at month 60 (75% of 80)
-        Train: months 1-60
-        Test: months 61-100 (includes peak and decline)
-    
-    WHY 75%?
-    - Gives model enough growth data to learn patterns
-    - Leaves enough test data to evaluate decline prediction
-    - The 70-80% you mentioned is captured in the test set
-    
-    Parameters:
-    -----------
-    df : DataFrame
-        Data with datetime index
-    target_column : str
-        Target variable column
-    train_fraction : float
-        Fraction of pre-peak data to use for training (default 0.75)
-    
-    Returns:
-    --------
-    Timestamp for the split point
+    This approach answers: "Given we've just hit the peak, 
+    what will the decline look like?"
     """
-    # Find peak
-    peak_date = find_peak_date(df, target_column)
+    peak_date = df[target_column].idxmax()
+    peak_value = df[target_column].max()
+    
+    total_months = len(df)
     peak_position = df.index.get_loc(peak_date)
     
-    # Calculate split position (fraction of the way to peak)
-    split_position = int(peak_position * train_fraction)
-    split_date = df.index[split_position]
+    print(f"Peak found: {peak_date.strftime('%Y-%m')} with value {peak_value}")
+    print(f"  Training: months 1-{peak_position + 1} (growth + peak)")
+    print(f"  Testing: months {peak_position + 2}-{total_months} (decline)")
     
-    # Calculate statistics
-    total_months = len(df)
-    train_months = split_position + 1
-    test_months = total_months - train_months
-    
-    print(f"\nSplit calculation:")
-    print(f"  Total months: {total_months}")
-    print(f"  Peak at month: {peak_position + 1} ({100*(peak_position+1)/total_months:.1f}%)")
-    print(f"  Split at month: {split_position + 1}")
-    print(f"  Training: months 1-{train_months} ({100*train_months/total_months:.1f}%)")
-    print(f"  Testing: months {train_months+1}-{total_months} ({100*test_months/total_months:.1f}%)")
-    
-    return split_date
+    return peak_date
 
 
 def create_train_test_split(df: pd.DataFrame,
@@ -156,24 +113,19 @@ def create_train_test_split(df: pd.DataFrame,
     --------
     Dictionary with X_train, y_train, X_test, y_test, etc.
     """
-    # Split chronologically
     train_df = df[df.index <= split_date].copy()
     test_df = df[df.index > split_date].copy()
     
-    # Identify feature columns (everything except target)
     feature_columns = [col for col in df.columns if col != target_column]
     
-    # Drop rows with NaN values
     train_df_clean = train_df.dropna()
     test_df_clean = test_df.dropna()
     
-    # Separate features and target
     X_train = train_df_clean[feature_columns]
     y_train = train_df_clean[target_column]
     X_test = test_df_clean[feature_columns]
     y_test = test_df_clean[target_column]
-    
-    # Create result dictionary
+
     result = {
         'X_train': X_train,
         'y_train': y_train,
@@ -187,7 +139,6 @@ def create_train_test_split(df: pd.DataFrame,
         'train_size': len(train_df_clean),
         'test_size': len(test_df_clean),
         'n_features': len(feature_columns),
-        # Keep full dataframes for reference
         'train_df': train_df_clean,
         'test_df': test_df_clean
     }
@@ -225,32 +176,26 @@ def visualize_split(sfs_df: pd.DataFrame,
         Path to save figure
     """
     fig, ax = plt.subplots(figsize=(14, 6))
-    
-    # Create masks for train/test
+   
     train_mask = sfs_df.index <= split_date
     test_mask = sfs_df.index > split_date
-    
-    # Plot training data
+
     ax.plot(sfs_df.index[train_mask], sfs_df.loc[train_mask, target_column],
             color='#2A9D8F', linewidth=2, label='Training Data (Growth Phase)')
     ax.fill_between(sfs_df.index[train_mask], sfs_df.loc[train_mask, target_column],
                     alpha=0.3, color='#2A9D8F')
-    
-    # Plot test data
+ 
     ax.plot(sfs_df.index[test_mask], sfs_df.loc[test_mask, target_column],
             color='#E63946', linewidth=2, label='Test Data (Saturation/Decline)')
     ax.fill_between(sfs_df.index[test_mask], sfs_df.loc[test_mask, target_column],
                     alpha=0.3, color='#E63946')
-    
-    # Mark split point
+
     ax.axvline(x=split_date, color='black', linestyle='--', linewidth=2,
                label=f'Split Point: {split_date.strftime("%Y-%m")}')
-    
-    # Mark peak
+
     ax.axvline(x=peak_date, color='gold', linestyle=':', linewidth=2,
                label=f'Peak: {peak_date.strftime("%Y-%m")}')
-    
-    # Formatting
+
     if title:
         ax.set_title(title, fontsize=14, fontweight='bold')
     ax.set_xlabel('Date')
@@ -310,13 +255,10 @@ def prepare_all_splits(feature_datasets: Dict,
     print("ZARA DRESS")
     print("-" * 40)
     
-    # Calculate split point
-    zara_split_date = calculate_split_point(
-        sfs_df, 'zara_frequency', train_fraction
-    )
+    zara_split_date = calculate_split_at_peak(sfs_df, 'zara_frequency')
+
     zara_peak_date = find_peak_date(sfs_df, 'zara_frequency')
-    
-    # Create splits for each model
+  
     for model in ['xgb', 'lstm', 'tft']:
         key = f'zara_{model}'
         print(f"\n  Preparing {model.upper()} split...")
@@ -331,7 +273,6 @@ def prepare_all_splits(feature_datasets: Dict,
         print(f"    Test: {splits[key]['test_size']} samples")
         print(f"    Features: {splits[key]['n_features']}")
     
-    # Visualize
     if visualize:
         visualize_split(
             sfs_df, 'zara_frequency', zara_split_date, zara_peak_date,
@@ -343,14 +284,11 @@ def prepare_all_splits(feature_datasets: Dict,
     print("\n" + "-" * 40)
     print("CHANEL BAG")
     print("-" * 40)
+ 
+    chanel_split_date = calculate_split_at_peak(sfs_df, 'chanel_frequency')
     
-    # Calculate split point
-    chanel_split_date = calculate_split_point(
-        sfs_df, 'chanel_frequency', train_fraction
-    )
     chanel_peak_date = find_peak_date(sfs_df, 'chanel_frequency')
-    
-    # Create splits for each model
+
     for model in ['xgb', 'lstm', 'tft']:
         key = f'chanel_{model}'
         print(f"\n  Preparing {model.upper()} split...")
@@ -364,8 +302,7 @@ def prepare_all_splits(feature_datasets: Dict,
         print(f"    Train: {splits[key]['train_size']} samples")
         print(f"    Test: {splits[key]['test_size']} samples")
         print(f"    Features: {splits[key]['n_features']}")
-    
-    # Visualize
+  
     if visualize:
         visualize_split(
             sfs_df, 'chanel_frequency', chanel_split_date, chanel_peak_date,
@@ -373,13 +310,11 @@ def prepare_all_splits(feature_datasets: Dict,
             save_path='plots/chanel_split.png' if save_plots else None
         )
     
-    # Store split dates for reference
     splits['zara_split_date'] = zara_split_date
     splits['zara_peak_date'] = zara_peak_date
     splits['chanel_split_date'] = chanel_split_date
     splits['chanel_peak_date'] = chanel_peak_date
-    
-    # Summary
+
     print("\n" + "=" * 60)
     print("SPLIT SUMMARY")
     print("=" * 60)
@@ -426,27 +361,23 @@ def print_split_info(split_data: Dict):
 # ============================================================
 if __name__ == "__main__":
     import os
-    from stage1_data_loading import load_all_data
-    from stage3_feature_engineering import prepare_all_model_features
-    
-    # Create plots directory
+    from load_data import load_all_data
+    from feature_eng import prepare_all_model_features
+   
     os.makedirs('plots', exist_ok=True)
     
-    # Load data
     data = load_all_data(
-        sfs_path='trend_counts_over_time.csv',
-        google_path='google_trends.csv',
-        weather_path='California_weather.csv'
+        sfs_path='data/trend_counts_over_time.csv',
+        google_path='data/google_trends.csv',
+        weather_path='data/California_weather.csv'
     )
-    
-    # Create features
+   
     feature_datasets = prepare_all_model_features(
         data['sfs'],
         data['google'],
         data['weather']
     )
     
-    # Create splits
     splits = prepare_all_splits(
         feature_datasets,
         data['sfs'],
@@ -455,5 +386,4 @@ if __name__ == "__main__":
         save_plots=True
     )
     
-    # Show detailed info for one split
     print_split_info(splits['zara_xgb'])
