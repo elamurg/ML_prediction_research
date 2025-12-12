@@ -1,6 +1,5 @@
 """
-Stage 5A: XGBoost Model
-========================
+XGBoost Model
 
 This module implements XGBoost for fashion trend prediction.
 
@@ -138,15 +137,12 @@ class XGBoostForecaster:
         """
         self.feature_names = list(X_train.columns)
         
-        # Create model
         self.model = xgb.XGBRegressor(**self.params)
         
-        # Prepare evaluation set
         eval_set = [(X_train, y_train)]
         if X_val is not None and y_val is not None:
             eval_set.append((X_val, y_val))
-        
-        # Train
+
         self.model.fit(
             X_train, y_train,
             eval_set=eval_set,
@@ -197,7 +193,6 @@ class XGBoostForecaster:
         mae = mean_absolute_error(y, predictions)
         r2 = r2_score(y, predictions)
         
-        # MAPE (handle zero values)
         mask = y != 0
         if mask.sum() > 0:
             mape = np.mean(np.abs((y[mask] - predictions[mask]) / y[mask])) * 100
@@ -285,27 +280,23 @@ def train_and_evaluate_xgboost(split_data: Dict,
     print(f"\nTraining samples: {len(X_train)}")
     print(f"Test samples: {len(X_test)}")
     print(f"Features: {len(X_train.columns)}")
-    
-    # Create and train model
+
     model = XGBoostForecaster()
     model.train(X_train, y_train, X_test, y_test)
-    
-    # Evaluate on training data
+
     print("\n--- Training Performance ---")
     train_metrics = model.evaluate(X_train, y_train)
     print(f"  RMSE: {train_metrics['rmse']:.2f}")
     print(f"  MAE:  {train_metrics['mae']:.2f}")
     print(f"  R2:   {train_metrics['r2']:.3f}")
-    
-    # Evaluate on test data
+ 
     print("\n--- Test Performance ---")
     test_metrics = model.evaluate(X_test, y_test)
     print(f"  RMSE: {test_metrics['rmse']:.2f}")
     print(f"  MAE:  {test_metrics['mae']:.2f}")
     print(f"  R2:   {test_metrics['r2']:.3f}")
     print(f"  MAPE: {test_metrics['mape']:.1f}%")
-    
-    # Check for overfitting
+ 
     print("\n--- Overfitting Check ---")
     rmse_diff = test_metrics['rmse'] - train_metrics['rmse']
     if rmse_diff > train_metrics['rmse'] * 0.5:
@@ -333,21 +324,17 @@ def plot_predictions(results: Dict,
                     save_path: str = None):
     """Visualize actual vs predicted values."""
     fig, ax = plt.subplots(figsize=(14, 6))
-    
-    # Plot training actual values
+
     ax.plot(results['train_dates'], results['y_train'],
             color='#2A9D8F', linewidth=2, label='Training (Actual)')
-    
-    # Plot test actual values
+ 
     ax.plot(results['test_dates'], results['y_test'],
             color='#457B9D', linewidth=2, label='Test (Actual)')
-    
-    # Plot test predictions
+
     ax.plot(results['test_dates'], results['test_predictions'],
             color='#E63946', linewidth=2, linestyle='--', 
             label='Test (Predicted)', marker='o', markersize=4)
-    
-    # Mark split point
+
     split_date = results['train_dates'][-1]
     ax.axvline(x=split_date, color='black', linestyle='--', 
                alpha=0.5, label='Train/Test Split')
@@ -373,34 +360,30 @@ def plot_predictions(results: Dict,
 # ============================================================
 if __name__ == "__main__":
     import os
-    from stage1_data_loading import load_all_data
-    from stage3_feature_engineering import prepare_all_model_features
-    from stage4_train_test_split import prepare_all_splits
+    from load_data import load_all_data
+    from feature_eng import prepare_all_model_features
+    from train_test import prepare_all_splits
     
     os.makedirs('plots', exist_ok=True)
     
-    # Load data
     print("Loading data...")
     data = load_all_data(
-        sfs_path='trend_counts_over_time.csv',
-        google_path='google_trends.csv',
-        weather_path='California_weather.csv'
+        sfs_path='data/trend_counts_over_time.csv',
+        google_path='data/google_trends.csv',
+        weather_path='data/California_weather.csv'
     )
     
-    # Create features
     print("\nCreating features...")
     feature_datasets = prepare_all_model_features(
         data['sfs'], data['google'], data['weather']
     )
-    
-    # Create splits
+ 
     print("\nCreating train/test splits...")
     splits = prepare_all_splits(
         feature_datasets, data['sfs'],
         train_fraction=0.75, visualize=False, save_plots=False
     )
     
-    # Train XGBoost models
     zara_results = train_and_evaluate_xgboost(
         splits['zara_xgb'], model_name="Zara XGBoost (SFS only)"
     )
