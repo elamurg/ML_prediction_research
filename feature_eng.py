@@ -441,6 +441,8 @@ def prepare_features_for_xgboost(sfs_df: pd.DataFrame,
     
     print(f"  Created {len(features.columns)} features")
     print(f"  Features: {list(features.columns)}")
+
+    features = features.replace([np.inf, -np.inf], np.nan)
     
     return features
 
@@ -500,6 +502,8 @@ def prepare_features_for_lstm(sfs_df: pd.DataFrame,
     print(f"  Created {len(features.columns)} features")
     print(f"  Includes Google Trends data")
     
+    features = features.replace([np.inf, -np.inf], np.nan)
+
     return features
 
 
@@ -568,6 +572,8 @@ def prepare_features_for_tft(sfs_df: pd.DataFrame,
     
     print(f"  Created {len(features.columns)} features")
     print(f"  Includes Google Trends + Weather data")
+
+    features = features.replace([np.inf, -np.inf], np.nan)
     
     return features
 
