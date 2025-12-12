@@ -1,6 +1,5 @@
 """
-Stage 5B: LSTM Model
-=====================
+LSTM Model
 
 This module implements LSTM (Long Short-Term Memory) for fashion trend prediction.
 
@@ -78,9 +77,7 @@ from typing import Dict, Tuple, List
 import warnings
 warnings.filterwarnings('ignore')
 
-# Set device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 
 class LSTMModel(nn.Module):
     """
@@ -123,8 +120,7 @@ class LSTMModel(nn.Module):
         
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        
-        # LSTM layer
+      
         # batch_first=True means input shape is (batch, sequence, features)
         self.lstm = nn.LSTM(
             input_size=input_size,
@@ -133,15 +129,12 @@ class LSTMModel(nn.Module):
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0
         )
-        
-        # Dropout for regularization
+ 
         self.dropout = nn.Dropout(dropout)
         
-        # Dense layers to produce final prediction
         self.fc1 = nn.Linear(hidden_size, 32)
         self.fc2 = nn.Linear(32, 1)
         
-        # Activation function
         self.relu = nn.ReLU()
     
     def forward(self, x):
@@ -156,16 +149,12 @@ class LSTMModel(nn.Module):
         Input shape: (batch_size, sequence_length, input_size)
         Output shape: (batch_size,)
         """
-        # LSTM forward pass
         # lstm_out: all hidden states for each time step
         # (h_n, c_n): final hidden state and cell state
         lstm_out, (h_n, c_n) = self.lstm(x)
         
-        # Take the last time step's output
-        # This contains information accumulated from the entire sequence
         last_output = lstm_out[:, -1, :]
         
-        # Pass through dense layers
         out = self.dropout(last_output)
         out = self.relu(self.fc1(out))
         out = self.fc2(out)
@@ -218,9 +207,7 @@ def create_sequences(features: np.ndarray,
     X, y = [], []
     
     for i in range(len(features) - sequence_length):
-        # Get sequence of features
         X.append(features[i:i + sequence_length])
-        # Get target (next value after sequence)
         y.append(target[i + sequence_length])
     
     return np.array(X), np.array(y)
@@ -308,11 +295,9 @@ class LSTMForecaster:
         IMPORTANT: We fit scalers on TRAINING data only!
         Using test data to fit scalers would be data leakage.
         """
-        # Convert to numpy
         X_array = X.values
         y_array = y.values.reshape(-1, 1)
         
-        # Scale data
         if fit_scalers:
             X_scaled = self.feature_scaler.fit_transform(X_array)
             y_scaled = self.target_scaler.fit_transform(y_array).flatten()
@@ -320,7 +305,6 @@ class LSTMForecaster:
             X_scaled = self.feature_scaler.transform(X_array)
             y_scaled = self.target_scaler.transform(y_array).flatten()
         
-        # Create sequences
         X_seq, y_seq = create_sequences(X_scaled, y_scaled, self.sequence_length)
         
         return X_seq, y_seq
@@ -352,25 +336,20 @@ class LSTMForecaster:
         - Good default choice for most problems
         """
         self.feature_names = list(X_train.columns)
-        
-        # Prepare training data
+      
         X_train_seq, y_train_seq = self.prepare_data(X_train, y_train, fit_scalers=True)
-        
-        # Prepare validation data if provided
+   
         if X_val is not None and y_val is not None:
             X_val_seq, y_val_seq = self.prepare_data(X_val, y_val, fit_scalers=False)
             X_val_tensor = torch.FloatTensor(X_val_seq).to(device)
             y_val_tensor = torch.FloatTensor(y_val_seq).to(device)
-        
-        # Convert to PyTorch tensors
+   
         X_train_tensor = torch.FloatTensor(X_train_seq).to(device)
         y_train_tensor = torch.FloatTensor(y_train_seq).to(device)
-        
-        # Create DataLoader for batch training
+
         train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
         train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
-        
-        # Initialize model
+    
         input_size = X_train.shape[1]
         self.model = LSTMModel(
             input_size=input_size,
@@ -378,32 +357,25 @@ class LSTMForecaster:
             num_layers=self.num_layers,
             dropout=self.dropout
         ).to(device)
-        
-        # Loss function and optimizer
+
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
-        
-        # Training loop
+      
         self.training_losses = []
         
         for epoch in range(self.epochs):
-            self.model.train()  # Set to training mode
+            self.model.train()  
             epoch_loss = 0
             
             for batch_X, batch_y in train_loader:
-                # Zero gradients
                 optimizer.zero_grad()
                 
-                # Forward pass
                 predictions = self.model(batch_X)
-                
-                # Compute loss
+         
                 loss = criterion(predictions, batch_y)
                 
-                # Backward pass
                 loss.backward()
                 
-                # Update weights
                 optimizer.step()
                 
                 epoch_loss += loss.item()
@@ -411,11 +383,9 @@ class LSTMForecaster:
             avg_loss = epoch_loss / len(train_loader)
             self.training_losses.append(avg_loss)
             
-            # Print progress
             if verbose and (epoch + 1) % 20 == 0:
                 msg = f"Epoch {epoch+1}/{self.epochs}, Loss: {avg_loss:.6f}"
                 
-                # Validation loss if available
                 if X_val is not None:
                     self.model.eval()
                     with torch.no_grad():
@@ -437,22 +407,17 @@ class LSTMForecaster:
         if self.model is None:
             raise ValueError("Model not trained. Call train() first.")
         
-        # Prepare data (use fitted scalers)
         X_scaled = self.feature_scaler.transform(X.values)
-        
-        # We need dummy y values for sequence creation
+      
         dummy_y = np.zeros(len(X))
         X_seq, _ = create_sequences(X_scaled, dummy_y, self.sequence_length)
         
-        # Convert to tensor
         X_tensor = torch.FloatTensor(X_seq).to(device)
         
-        # Predict
         self.model.eval()
         with torch.no_grad():
             predictions_scaled = self.model(X_tensor).cpu().numpy()
         
-        # Unscale predictions
         predictions = self.target_scaler.inverse_transform(
             predictions_scaled.reshape(-1, 1)
         ).flatten()
@@ -461,18 +426,15 @@ class LSTMForecaster:
     
     def evaluate(self, X: pd.DataFrame, y: pd.Series) -> Dict:
         """Evaluate model performance."""
-        # Get predictions
+
         predictions = self.predict(X)
-        
-        # Align y values (account for sequence creation)
+       
         y_actual = y.values[self.sequence_length:]
         
-        # Calculate metrics
         rmse = np.sqrt(mean_squared_error(y_actual, predictions))
         mae = mean_absolute_error(y_actual, predictions)
         r2 = r2_score(y_actual, predictions)
         
-        # MAPE
         mask = y_actual != 0
         if mask.sum() > 0:
             mape = np.mean(np.abs((y_actual[mask] - predictions[mask]) / y_actual[mask])) * 100
@@ -536,21 +498,48 @@ def train_and_evaluate_lstm(split_data: Dict,
     print(f"Sequence length: {sequence_length}")
     print(f"Device: {device}")
     
-    # Create and train model
     model = LSTMForecaster(
-        sequence_length=sequence_length,
-        hidden_size=64,
-        num_layers=2,
-        dropout=0.2,
-        learning_rate=0.001,
+        sequence_length=3,
+        hidden_size=16,
+        num_layers=1,
+        dropout=0.1,
+        learning_rate=0.0005,
         epochs=epochs,
-        batch_size=16
+        batch_size=8
     )
     
     print("\nTraining LSTM...")
     model.train(X_train, y_train, X_test, y_test, verbose=True)
     
-    # Evaluate
+    #bridged data
+    bridge_length = sequence_length
+    X_bridge = pd.concat([X_train.iloc[-bridge_length:], X_test])
+    y_bridge = pd.concat([y_train.iloc[-bridge_length:], y_test])
+    
+    
+    predictions = model.predict(X_bridge)
+    
+    y_actual = y_test.values
+    
+    rmse = np.sqrt(mean_squared_error(y_actual, predictions))
+    mae = mean_absolute_error(y_actual, predictions)
+    r2 = r2_score(y_actual, predictions)
+    
+    mask = y_actual != 0
+    if mask.sum() > 0:
+        mape = np.mean(np.abs((y_actual[mask] - predictions[mask]) / y_actual[mask])) * 100
+    else:
+        mape = np.nan
+    
+    test_metrics = {
+        'rmse': rmse,
+        'mae': mae,
+        'r2': r2,
+        'mape': mape,
+        'predictions': predictions,
+        'actual': y_actual
+    }
+    
     print("\n--- Test Performance ---")
     test_metrics = model.evaluate(X_test, y_test)
     print(f"  RMSE: {test_metrics['rmse']:.2f}")
@@ -561,9 +550,9 @@ def train_and_evaluate_lstm(split_data: Dict,
     return {
         'model': model,
         'test_metrics': test_metrics,
-        'predictions': test_metrics['predictions'],
-        'actual': test_metrics['actual'],
-        'test_dates': split_data['test_dates'][sequence_length:],
+        'predictions': predictions,
+        'actual': y_actual,
+        'test_dates': split_data['test_dates'],
         'train_dates': split_data['train_dates']
     }
 
@@ -576,20 +565,16 @@ def plot_lstm_predictions(results: Dict,
     """Visualize LSTM predictions vs actual."""
     fig, ax = plt.subplots(figsize=(14, 6))
     
-    # Plot training data
     ax.plot(train_dates, train_y, color='#2A9D8F', 
             linewidth=2, label='Training (Actual)')
     
-    # Plot test actual
     ax.plot(results['test_dates'], results['actual'],
             color='#457B9D', linewidth=2, label='Test (Actual)')
     
-    # Plot predictions
     ax.plot(results['test_dates'], results['predictions'],
             color='#E63946', linewidth=2, linestyle='--',
             label='Test (Predicted)', marker='o', markersize=4)
-    
-    # Split line
+   
     ax.axvline(x=train_dates[-1], color='black', 
                linestyle='--', alpha=0.5, label='Train/Test Split')
     
@@ -614,40 +599,36 @@ def plot_lstm_predictions(results: Dict,
 # ============================================================
 if __name__ == "__main__":
     import os
-    from stage1_data_loading import load_all_data
-    from stage3_feature_engineering import prepare_all_model_features
-    from stage4_train_test_split import prepare_all_splits
+    from load_data import load_all_data
+    from feature_eng import prepare_all_model_features
+    from train_test import prepare_all_splits
     
     os.makedirs('plots', exist_ok=True)
     
     print(f"Using device: {device}")
     
-    # Load data
     print("\nLoading data...")
     data = load_all_data(
-        sfs_path='trend_counts_over_time.csv',
-        google_path='google_trends.csv',
-        weather_path='California_weather.csv'
+        sfs_path='data/trend_counts_over_time.csv',
+        google_path='data/google_trends.csv',
+        weather_path='data/California_weather.csv'
     )
-    
-    # Create features
+
     print("\nCreating features...")
     feature_datasets = prepare_all_model_features(
         data['sfs'], data['google'], data['weather']
     )
-    
-    # Create splits
+  
     print("\nCreating train/test splits...")
     splits = prepare_all_splits(
         feature_datasets, data['sfs'],
         train_fraction=0.75, visualize=False, save_plots=False
     )
-    
-    # Train LSTM for Zara (with Google Trends)
+   
     zara_results = train_and_evaluate_lstm(
         splits['zara_lstm'],
         model_name="Zara LSTM (SFS + Google Trends)",
-        sequence_length=6,
+        sequence_length=3,
         epochs=100
     )
     
@@ -659,11 +640,10 @@ if __name__ == "__main__":
         save_path='plots/zara_lstm_predictions.png'
     )
     
-    # Train LSTM for Chanel
     chanel_results = train_and_evaluate_lstm(
         splits['chanel_lstm'],
         model_name="Chanel LSTM (SFS + Google Trends)",
-        sequence_length=6,
+        sequence_length=3,
         epochs=100
     )
     
@@ -680,3 +660,47 @@ if __name__ == "__main__":
     print("="*60)
     print(f"\nZara:   Test RMSE={zara_results['test_metrics']['rmse']:.2f}, R2={zara_results['test_metrics']['r2']:.3f}")
     print(f"Chanel: Test RMSE={chanel_results['test_metrics']['rmse']:.2f}, R2={chanel_results['test_metrics']['r2']:.3f}")
+    # === SFS-ONLY LSTM FOR COMPARISON ===
+    print("\n" + "="*60)
+    print("TRAINING LSTM WITH SFS DATA ONLY (FOR COMPARISON)")
+    print("="*60)
+
+    zara_results_sfs = train_and_evaluate_lstm(
+        splits['zara_xgb'],
+        model_name="Zara LSTM (SFS only)",
+        sequence_length=3,
+        epochs=100
+        )
+
+    plot_lstm_predictions(
+        zara_results_sfs,
+        splits['zara_xgb']['y_train'],
+        splits['zara_xgb']['train_dates'],
+        title='Zara Dress: LSTM (SFS only) Predictions vs Actual',
+        save_path='plots/zara_lstm_sfs_only_predictions.png'
+        )
+
+    chanel_results_sfs = train_and_evaluate_lstm(
+        splits['chanel_xgb'],
+        model_name="Chanel LSTM (SFS only)",
+        sequence_length=3,
+        epochs=100
+        )
+
+    plot_lstm_predictions(
+        chanel_results_sfs,
+        splits['chanel_xgb']['y_train'],
+        splits['chanel_xgb']['train_dates'],
+        title='Chanel Bag: LSTM (SFS only) Predictions vs Actual',
+        save_path='plots/chanel_lstm_sfs_only_predictions.png'
+        )
+
+    print("\n" + "="*60)
+    print("LSTM COMPARISON SUMMARY")
+    print("="*60)
+    print("\nWith Google Trends:")
+    print(f"  Zara:   RMSE={zara_results['test_metrics']['rmse']:.2f}, R2={zara_results['test_metrics']['r2']:.3f}")
+    print(f"  Chanel: RMSE={chanel_results['test_metrics']['rmse']:.2f}, R2={chanel_results['test_metrics']['r2']:.3f}")
+    print("\nSFS Only:")
+    print(f"  Zara:   RMSE={zara_results_sfs['test_metrics']['rmse']:.2f}, R2={zara_results_sfs['test_metrics']['r2']:.3f}")
+    print(f"  Chanel: RMSE={chanel_results_sfs['test_metrics']['rmse']:.2f}, R2={chanel_results_sfs['test_metrics']['r2']:.3f}")
