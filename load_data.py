@@ -300,9 +300,9 @@ def load_all_data(sfs_path, google_path, weather_path):
 # ============================================================
 if __name__ == "__main__":
     data = load_all_data(
-        sfs_path='trend_counts_over_time.csv',
-        google_path='google_trends.csv',
-        weather_path='California_weather.csv'
+        sfs_path='data/trend_counts_over_time.csv',
+        google_path='data/google_trends.csv',
+        weather_path='data/California_weather.csv'
     )
     
     print("\n\nSample of each dataset:")

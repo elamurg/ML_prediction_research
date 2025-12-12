@@ -25,7 +25,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from load_data import load_all_data
 
-# Set plotting style
 plt.style.use('seaborn-v0_8-whitegrid')
 plt.rcParams['figure.figsize'] = (12, 6)
 plt.rcParams['font.size'] = 11
@@ -56,15 +55,13 @@ def plot_trend_lifecycles(sfs_df, save_path=None):
     """
     fig, axes = plt.subplots(2, 1, figsize=(14, 10))
     
-    # === ZARA DRESS ===
     ax1 = axes[0]
     ax1.plot(sfs_df.index, sfs_df['zara_frequency'], 
-             color='#E63946', linewidth=2, marker='o', markersize=4, 
+             color="#39E687", linewidth=2, marker='o', markersize=4, 
              label='Zara Dress Frequency')
     ax1.fill_between(sfs_df.index, sfs_df['zara_frequency'], 
-                     alpha=0.3, color='#E63946')
-    
-    # Find and mark the peak
+                     alpha=0.3, color='#39E687')
+ 
     zara_peak_idx = sfs_df['zara_frequency'].idxmax()
     zara_peak_val = sfs_df['zara_frequency'].max()
     ax1.axvline(x=zara_peak_idx, color='darkred', linestyle='--', 
@@ -77,8 +74,7 @@ def plot_trend_lifecycles(sfs_df, save_path=None):
     ax1.set_ylabel('Frequency Count')
     ax1.legend(loc='upper right')
     ax1.grid(True, alpha=0.3)
-    
-    # === CHANEL BAG ===
+ 
     ax2 = axes[1]
     ax2.plot(sfs_df.index, sfs_df['chanel_frequency'], 
              color='#457B9D', linewidth=2, marker='o', markersize=4,
@@ -86,7 +82,6 @@ def plot_trend_lifecycles(sfs_df, save_path=None):
     ax2.fill_between(sfs_df.index, sfs_df['chanel_frequency'], 
                      alpha=0.3, color='#457B9D')
     
-    # Find and mark the peak
     chanel_peak_idx = sfs_df['chanel_frequency'].idxmax()
     chanel_peak_val = sfs_df['chanel_frequency'].max()
     ax2.axvline(x=chanel_peak_idx, color='darkblue', linestyle='--', 
@@ -108,7 +103,6 @@ def plot_trend_lifecycles(sfs_df, save_path=None):
     
     plt.show()
     
-    # Print peak analysis
     print("\n" + "=" * 50)
     print("PEAK ANALYSIS")
     print("=" * 50)
@@ -156,7 +150,6 @@ def plot_sfs_vs_google_trends(sfs_df, google_df, save_path=None):
     google_df : DataFrame - Google Trends data
     save_path : str, optional - Path to save figure
     """
-    # Ensure we're using overlapping dates
     common_dates = sfs_df.index.intersection(google_df.index)
     sfs_aligned = sfs_df.loc[common_dates]
     google_aligned = google_df.loc[common_dates]
@@ -166,11 +159,10 @@ def plot_sfs_vs_google_trends(sfs_df, google_df, save_path=None):
     # === ZARA DRESS ===
     ax1 = axes[0]
     ax1_twin = ax1.twinx()  # Create second y-axis
-    
-    # Plot SFS on primary axis
+
     line1, = ax1.plot(sfs_aligned.index, sfs_aligned['zara_frequency'], 
                       color='#E63946', linewidth=2, label='SFS Frequency')
-    # Plot Google on secondary axis
+    
     line2, = ax1_twin.plot(google_aligned.index, google_aligned['zara_search_interest'], 
                            color='#2A9D8F', linewidth=2, linestyle='--', 
                            label='Google Search Interest')
@@ -238,7 +230,6 @@ def analyze_correlations(sfs_df, google_df):
     --------
     Dictionary containing correlation results
     """
-    # Align datasets
     common_dates = sfs_df.index.intersection(google_df.index)
     sfs_aligned = sfs_df.loc[common_dates]
     google_aligned = google_df.loc[common_dates]
@@ -246,20 +237,17 @@ def analyze_correlations(sfs_df, google_df):
     print("=" * 60)
     print("CORRELATION ANALYSIS")
     print("=" * 60)
-    
-    # Basic correlation (same time period)
+   
     zara_corr = sfs_aligned['zara_frequency'].corr(google_aligned['zara_search_interest'])
     chanel_corr = sfs_aligned['chanel_frequency'].corr(google_aligned['chanel_search_interest'])
     
     print(f"\nSAME-TIME CORRELATION (SFS vs Google at same month):")
     print(f"  Zara:   {zara_corr:.3f}")
     print(f"  Chanel: {chanel_corr:.3f}")
-    
-    # Interpretation guide
+
     print("\n  Interpretation:")
     print("  0.0-0.3: Weak | 0.3-0.7: Moderate | 0.7-1.0: Strong")
-    
-    # Lagged correlation analysis
+ 
     print("\n" + "-" * 60)
     print("LAGGED CORRELATION (Does Google lead SFS?)")
     print("-" * 60)
@@ -272,8 +260,6 @@ def analyze_correlations(sfs_df, google_df):
     }
     
     for lag in [1, 2, 3, 6]:
-        # Shift Google data back (positive lag means Google earlier)
-        # .shift(lag) moves data forward, so earlier Google values align with later SFS
         zara_lag_corr = sfs_aligned['zara_frequency'].corr(
             google_aligned['zara_search_interest'].shift(lag)
         )
@@ -285,12 +271,10 @@ def analyze_correlations(sfs_df, google_df):
         
         print(f"  Lag {lag} month(s): Zara={zara_lag_corr:.3f}, Chanel={chanel_lag_corr:.3f}")
     
-    # Find optimal lag
     print("\n" + "-" * 60)
     print("INTERPRETATION")
     print("-" * 60)
-    
-    # Determine best lag for each trend
+
     for trend in ['zara', 'chanel']:
         all_corrs = [(0, results['same_time'][trend])]
         all_corrs += [(lag, results['lagged'][lag][trend]) for lag in results['lagged']]
@@ -325,28 +309,24 @@ def plot_weather_patterns(weather_df, save_path=None):
     """
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     
-    # Temperature over time
     axes[0, 0].plot(weather_df.index, weather_df['avg_temperature'], 
                     color='#E76F51', linewidth=1.5)
     axes[0, 0].set_title('Average Monthly Temperature', fontweight='bold')
     axes[0, 0].set_ylabel('Temperature (°C)')
     axes[0, 0].grid(True, alpha=0.3)
     
-    # Humidity over time
     axes[0, 1].plot(weather_df.index, weather_df['avg_humidity'], 
                     color='#2A9D8F', linewidth=1.5)
     axes[0, 1].set_title('Average Monthly Humidity', fontweight='bold')
     axes[0, 1].set_ylabel('Humidity (%)')
     axes[0, 1].grid(True, alpha=0.3)
     
-    # Rainfall over time
     axes[1, 0].bar(weather_df.index, weather_df['total_rainfall'], 
                    color='#457B9D', alpha=0.7, width=20)
     axes[1, 0].set_title('Total Monthly Rainfall', fontweight='bold')
     axes[1, 0].set_ylabel('Rainfall (mm)')
     axes[1, 0].grid(True, alpha=0.3)
     
-    # Cloud cover over time
     axes[1, 1].plot(weather_df.index, weather_df['avg_cloud_cover'], 
                     color='#6C757D', linewidth=1.5)
     axes[1, 1].set_title('Average Monthly Cloud Cover', fontweight='bold')
@@ -381,20 +361,16 @@ def plot_monthly_seasonality(weather_df, save_path=None):
     weather_df : DataFrame - Monthly weather data
     save_path : str, optional - Path to save figure
     """
-    # Add month column for grouping
     weather_copy = weather_df.copy()
     weather_copy['month'] = weather_copy.index.month
-    
-    # Calculate monthly averages across all years
+
     monthly_avg = weather_copy.groupby('month').mean()
-    
-    # Create visualization
+
     fig, ax = plt.subplots(figsize=(12, 6))
     
     x = np.arange(1, 13)
     width = 0.35
     
-    # Normalize temperature to 0-100 scale for comparison with humidity
     temp_min = monthly_avg['avg_temperature'].min()
     temp_max = monthly_avg['avg_temperature'].max()
     temp_normalized = (monthly_avg['avg_temperature'] - temp_min) / (temp_max - temp_min) * 100
@@ -420,8 +396,7 @@ def plot_monthly_seasonality(weather_df, save_path=None):
         print(f"Saved: {save_path}")
     
     plt.show()
-    
-    # Print summary
+   
     print("\n" + "=" * 50)
     print("MONTHLY WEATHER SUMMARY")
     print("=" * 50)
@@ -477,10 +452,8 @@ def run_full_eda(sfs_df, google_df, weather_df, save_figures=True):
     """
     results = {}
     
-    # 1. Summary statistics
     print_summary_statistics(sfs_df, google_df, weather_df)
     
-    # 2. Trend lifecycle visualization
     print("\n\n")
     peak_info = plot_trend_lifecycles(
         sfs_df, 
@@ -488,26 +461,22 @@ def run_full_eda(sfs_df, google_df, weather_df, save_figures=True):
     )
     results['peaks'] = peak_info
     
-    # 3. SFS vs Google Trends comparison
     print("\n\n")
     plot_sfs_vs_google_trends(
         sfs_df, google_df,
         save_path='plots/sfs_vs_google.png' if save_figures else None
     )
     
-    # 4. Correlation analysis
     print("\n\n")
     corr_results = analyze_correlations(sfs_df, google_df)
     results['correlations'] = corr_results
     
-    # 5. Weather patterns
     print("\n\n")
     plot_weather_patterns(
         weather_df,
         save_path='plots/weather_patterns.png' if save_figures else None
     )
     
-    # 6. Monthly seasonality
     print("\n\n")
     monthly_weather = plot_monthly_seasonality(
         weather_df,
@@ -523,18 +492,15 @@ def run_full_eda(sfs_df, google_df, weather_df, save_figures=True):
 # ============================================================
 if __name__ == "__main__":
     import os
-    
-    # Create plots directory if it doesn't exist
+   
     os.makedirs('plots', exist_ok=True)
     
-    # Load data
     data = load_all_data(
-        sfs_path='trend_counts_over_time.csv',
-        google_path='google_trends.csv',
-        weather_path='California_weather.csv'
+        sfs_path='data/trend_counts_over_time.csv',
+        google_path='data/google_trends.csv',
+        weather_path='data/California_weather.csv'
     )
-    
-    # Run EDA
+  
     results = run_full_eda(
         data['sfs'], 
         data['google'], 
