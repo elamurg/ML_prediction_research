@@ -221,7 +221,6 @@ class LSTMForecaster:
 
 
 def prepare_weekly_features(sfs_df: pd.DataFrame, 
-                           weather_df: pd.DataFrame,
                            target_col: str) -> pd.DataFrame:
     """
     Prepare features for weekly LSTM/TFT models.
@@ -229,15 +228,12 @@ def prepare_weekly_features(sfs_df: pd.DataFrame,
     Features created:
     - Lag features (1, 2, 4, 8, 12, 26, 52 weeks)
     - Rolling statistics (4, 12, 26 week windows)
-    - Weather features
     - Calendar features
     
     Parameters:
     -----------
     sfs_df : DataFrame
         Weekly SFS data with trend frequencies
-    weather_df : DataFrame
-        Weekly weather data
     target_col : str
         Target column name ('zara_frequency' or 'chanel_frequency')
     
@@ -248,38 +244,27 @@ def prepare_weekly_features(sfs_df: pd.DataFrame,
     df = pd.DataFrame(index=sfs_df.index)
     df[target_col] = sfs_df[target_col]
     
-    # === LAG FEATURES ===
     lag_weeks = [1, 2, 4, 8, 12, 26, 52]
     for lag in lag_weeks:
         df[f'lag_{lag}w'] = df[target_col].shift(lag)
     
-    # === ROLLING STATISTICS ===
+
     windows = [4, 12, 26]
     for window in windows:
         df[f'rolling_mean_{window}w'] = df[target_col].shift(1).rolling(window, min_periods=1).mean()
         df[f'rolling_std_{window}w'] = df[target_col].shift(1).rolling(window, min_periods=1).std()
         df[f'rolling_min_{window}w'] = df[target_col].shift(1).rolling(window, min_periods=1).min()
         df[f'rolling_max_{window}w'] = df[target_col].shift(1).rolling(window, min_periods=1).max()
-    
-    # === MOMENTUM FEATURES ===
+
     df['momentum_1w'] = df[target_col].diff(1)
     df['momentum_4w'] = df[target_col].diff(4)
     df['momentum_12w'] = df[target_col].diff(12)
-    
+ 
     for period in [1, 4, 12]:
         pct_change = df[target_col].pct_change(period)
         pct_change = pct_change.replace([np.inf, -np.inf], np.nan)
         df[f'pct_change_{period}w'] = pct_change
-    
-    # === WEATHER FEATURES ===
-    if weather_df is not None:
-        weather_aligned = weather_df.reindex(df.index)
-        
-        for col in weather_df.columns:
-            df[col] = weather_aligned[col]
-            df[f'{col}_lag_1w'] = weather_aligned[col].shift(1)
-            df[f'{col}_lag_4w'] = weather_aligned[col].shift(4)
-    
+ 
     df['week_of_year'] = df.index.isocalendar().week.astype(int)
     df['month'] = df.index.month
     df['quarter'] = df.index.quarter
@@ -287,7 +272,7 @@ def prepare_weekly_features(sfs_df: pd.DataFrame,
     
     df['week_sin'] = np.sin(2 * np.pi * df['week_of_year'] / 52)
     df['week_cos'] = np.cos(2 * np.pi * df['week_of_year'] / 52)
-    
+
     df = df.ffill().bfill()
     
     df = df.replace([np.inf, -np.inf], np.nan)
@@ -315,15 +300,16 @@ def create_weekly_train_test_split(features_df: pd.DataFrame,
     --------
     Dictionary with train/test data
     """
+
     peak_idx = features_df[target_col].idxmax()
     peak_loc = features_df.index.get_loc(peak_idx)
     
     print(f"Peak found at: {peak_idx.strftime('%Y-%m-%d')}")
     print(f"Peak value: {features_df[target_col].max():.2f}")
-    
+  
     train_df = features_df.iloc[:peak_loc + 1]
     test_df = features_df.iloc[peak_loc + 1:]
-
+   
     feature_cols = [c for c in features_df.columns if c != target_col]
     
     X_train = train_df[feature_cols]
@@ -376,7 +362,7 @@ def train_and_evaluate_lstm_weekly(split_data: Dict,
     print(f"Features: {len(X_train.columns)}")
     print(f"Sequence length: {sequence_length} weeks")
     print(f"Device: {device}")
-    
+ 
     model = LSTMForecaster(
         sequence_length=sequence_length,
         hidden_size=hidden_size,
@@ -384,12 +370,12 @@ def train_and_evaluate_lstm_weekly(split_data: Dict,
         dropout=dropout,
         learning_rate=0.001,
         epochs=epochs,
-        batch_size=32  
+        batch_size=32  # Larger batch size since we have more data
     )
     
     print("\nTraining LSTM...")
     model.train(X_train, y_train, X_test, y_test, verbose=True)
-
+    
     bridge_length = sequence_length
     X_bridge = pd.concat([X_train.iloc[-bridge_length:], X_test])
     y_bridge = pd.concat([y_train.iloc[-bridge_length:], y_test])
@@ -399,7 +385,7 @@ def train_and_evaluate_lstm_weekly(split_data: Dict,
     
     if len(predictions) > len(y_actual):
         predictions = predictions[-len(y_actual):]
-  
+    
     rmse = np.sqrt(mean_squared_error(y_actual, predictions))
     mae = mean_absolute_error(y_actual, predictions)
     r2 = r2_score(y_actual, predictions)
@@ -454,6 +440,7 @@ def plot_lstm_predictions_weekly(results: Dict,
     ax.legend(loc='best')
     ax.grid(True, alpha=0.3)
     
+    # Add metrics annotation
     metrics = results['test_metrics']
     metrics_text = f"R² = {metrics['r2']:.3f}\nRMSE = {metrics['rmse']:.2f}"
     ax.annotate(metrics_text, xy=(0.02, 0.98), xycoords='axes fraction',
@@ -479,23 +466,23 @@ if __name__ == "__main__":
     os.makedirs('plots', exist_ok=True)
     
     print(f"Using device: {device}")
-    
+
     print("\n" + "="*60)
     print("LOADING WEEKLY DATA")
     print("="*60)
     
     data = load_all_weekly_data(
         sfs_metadata_path='data/SFS_metadata.csv',
-        #weather_path='data/California_weather.csv'
+        weather_path='data/California_weather.csv'
     )
     
     # === ZARA DRESS ===
     print("\n" + "="*60)
     print("ZARA DRESS - WEEKLY LSTM")
     print("="*60)
-    
+   
     zara_features = prepare_weekly_features(
-        data['sfs'], data['weather'], 'zara_frequency'
+        data['sfs'], 'zara_frequency'
     )
     print(f"\nZara features shape: {zara_features.shape}")
     print(f"Feature columns: {len(zara_features.columns) - 1}")  # -1 for target
@@ -506,39 +493,39 @@ if __name__ == "__main__":
     
     zara_results = train_and_evaluate_lstm_weekly(
         zara_split,
-        model_name="Zara LSTM (Weekly SFS + Weather)",
+        model_name="Zara LSTM (Weekly SFS only)",
         sequence_length=12,  # 12 weeks = ~3 months
         hidden_size=64,
         num_layers=2,
         dropout=0.2,
         epochs=150
     )
-    
+   
     plot_lstm_predictions_weekly(
         zara_results,
         zara_split['y_train'],
         zara_split['train_dates'],
         title='Zara Dress: Weekly LSTM Predictions vs Actual',
-        save_path='plots/zara_lstm_weekly_predictions_V1.png'
+        save_path='plots/zara_lstm_weekly_predictions.png'
     )
     
     # === CHANEL BAG ===
     print("\n" + "="*60)
     print("CHANEL BAG - WEEKLY LSTM")
     print("="*60)
- 
+
     chanel_features = prepare_weekly_features(
-        data['sfs'], data['weather'], 'chanel_frequency'
+        data['sfs'], 'chanel_frequency'
     )
     print(f"\nChanel features shape: {chanel_features.shape}")
-
+    
     chanel_split = create_weekly_train_test_split(
         chanel_features, 'chanel_frequency', split_at_peak=True
     )
-    
+
     chanel_results = train_and_evaluate_lstm_weekly(
         chanel_split,
-        model_name="Chanel LSTM (Weekly SFS + Weather)",
+        model_name="Chanel LSTM (Weekly SFS only)",
         sequence_length=12,
         hidden_size=64,
         num_layers=2,
@@ -551,7 +538,7 @@ if __name__ == "__main__":
         chanel_split['y_train'],
         chanel_split['train_dates'],
         title='Chanel Bag: Weekly LSTM Predictions vs Actual',
-        save_path='plots/chanel_lstm_weekly_predictions_V1.png'
+        save_path='plots/chanel_lstm_weekly_predictions.png'
     )
     
     # === SUMMARY ===
