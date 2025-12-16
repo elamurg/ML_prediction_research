@@ -2,14 +2,7 @@
 TFT Model - Weekly Data Version
 
 This module implements Temporal Fusion Transformer for fashion trend prediction
-using WEEKLY data.
-
-KEY CHANGES FROM MONTHLY VERSION:
----------------------------------
-- ~400 samples instead of ~94 (4x more data)
-- Sequence length adjusted for weekly granularity
-- No Google Trends (only available monthly)
-- Better suited for attention mechanisms with more data points
+using WEEKLY data with Google Trends.
 """
 
 import numpy as np
@@ -20,7 +13,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import matplotlib.pyplot as plt
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -51,7 +44,7 @@ class VariableSelectionNetwork(nn.Module):
 
 
 class TemporalAttention(nn.Module):
-    """Temporal Self-Attention - learns which time steps are important."""
+    """Temporal Self-Attention."""
     
     def __init__(self, hidden_size: int, num_heads: int = 4, dropout: float = 0.1):
         super().__init__()
@@ -103,24 +96,12 @@ class SimplifiedTFT(nn.Module):
                  dropout: float = 0.2):
         super().__init__()
         
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        
         self.var_selection = VariableSelectionNetwork(input_size, hidden_size, dropout)
-        
-        self.lstm = nn.LSTM(
-            input_size=hidden_size,
-            hidden_size=hidden_size,
-            num_layers=lstm_layers,
-            batch_first=True,
-            dropout=dropout if lstm_layers > 1 else 0
-        )
-        
+        self.lstm = nn.LSTM(hidden_size, hidden_size, lstm_layers, batch_first=True,
+                           dropout=dropout if lstm_layers > 1 else 0)
         self.attention = TemporalAttention(hidden_size, attention_heads, dropout)
-        
         self.layer_norm1 = nn.LayerNorm(hidden_size)
         self.layer_norm2 = nn.LayerNorm(hidden_size)
-        
         self.dropout = nn.Dropout(dropout)
         self.fc1 = nn.Linear(hidden_size, 32)
         self.fc2 = nn.Linear(32, 1)
@@ -141,7 +122,6 @@ class SimplifiedTFT(nn.Module):
         attended = self.layer_norm2(attended + lstm_out)
         
         final = attended[:, -1, :]
-        
         out = self.dropout(final)
         out = self.relu(self.fc1(out))
         out = self.fc2(out)
@@ -172,16 +152,14 @@ class TFTForecaster:
         self.training_losses = []
         self.feature_names = None
     
-    def create_sequences(self, features: np.ndarray, 
-                        target: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def create_sequences(self, features: np.ndarray, target: np.ndarray):
         X, y = [], []
         for i in range(len(features) - self.sequence_length):
             X.append(features[i:i + self.sequence_length])
             y.append(target[i + self.sequence_length])
         return np.array(X), np.array(y)
     
-    def prepare_data(self, X: pd.DataFrame, y: pd.Series,
-                    fit_scalers: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+    def prepare_data(self, X: pd.DataFrame, y: pd.Series, fit_scalers: bool = True):
         X_array = X.values
         y_array = y.values.reshape(-1, 1)
         
@@ -196,10 +174,9 @@ class TFTForecaster:
     
     def train(self, X_train: pd.DataFrame, y_train: pd.Series,
               X_val: pd.DataFrame = None, y_val: pd.Series = None,
-              verbose: bool = True) -> 'TFTForecaster':
+              verbose: bool = True):
         
         self.feature_names = list(X_train.columns)
-        
         X_train_seq, y_train_seq = self.prepare_data(X_train, y_train, fit_scalers=True)
         
         if X_val is not None:
@@ -223,11 +200,7 @@ class TFTForecaster:
         
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=10
-        )
-        
-        self.training_losses = []
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=10)
         
         for epoch in range(self.epochs):
             self.model.train()
@@ -275,31 +248,7 @@ class TFTForecaster:
         with torch.no_grad():
             predictions_scaled = self.model(X_tensor).cpu().numpy()
         
-        predictions = self.target_scaler.inverse_transform(
-            predictions_scaled.reshape(-1, 1)
-        ).flatten()
-        
-        return predictions
-    
-    def evaluate(self, X: pd.DataFrame, y: pd.Series) -> Dict:
-        predictions = self.predict(X)
-        y_actual = y.values[self.sequence_length:]
-        
-        rmse = np.sqrt(mean_squared_error(y_actual, predictions))
-        mae = mean_absolute_error(y_actual, predictions)
-        r2 = r2_score(y_actual, predictions)
-        
-        mask = y_actual != 0
-        mape = np.mean(np.abs((y_actual[mask] - predictions[mask]) / y_actual[mask])) * 100 if mask.sum() > 0 else np.nan
-        
-        return {
-            'rmse': rmse,
-            'mae': mae,
-            'r2': r2,
-            'mape': mape,
-            'predictions': predictions,
-            'actual': y_actual
-        }
+        return self.target_scaler.inverse_transform(predictions_scaled.reshape(-1, 1)).flatten()
     
     def get_feature_importance(self, X: pd.DataFrame) -> pd.DataFrame:
         if self.model is None:
@@ -331,7 +280,7 @@ class TFTForecaster:
         ax.barh(range(top_n), top_features['importance'].values[::-1], color='#E76F51')
         ax.set_yticks(range(top_n))
         ax.set_yticklabels(top_features['feature'].values[::-1])
-        ax.set_xlabel('Feature Importance (Attention Weight)')
+        ax.set_xlabel('Feature Importance')
         
         if title:
             ax.set_title(title, fontsize=14, fontweight='bold')
@@ -344,95 +293,8 @@ class TFTForecaster:
         return importance_df
 
 
-def prepare_weekly_features(sfs_df: pd.DataFrame, 
-                           weather_df: pd.DataFrame,
-                           target_col: str) -> pd.DataFrame:
-    """
-    Prepare features for weekly LSTM/TFT models.
-    (Same function as in lstm_weekly.py for consistency)
-    """
-    df = pd.DataFrame(index=sfs_df.index)
-    df[target_col] = sfs_df[target_col]
-    
-    # Lag features
-    lag_weeks = [1, 2, 4, 8, 12, 26, 52]
-    for lag in lag_weeks:
-        df[f'lag_{lag}w'] = df[target_col].shift(lag)
-    
-    # Rolling statistics
-    windows = [4, 12, 26]
-    for window in windows:
-        df[f'rolling_mean_{window}w'] = df[target_col].shift(1).rolling(window, min_periods=1).mean()
-        df[f'rolling_std_{window}w'] = df[target_col].shift(1).rolling(window, min_periods=1).std()
-        df[f'rolling_min_{window}w'] = df[target_col].shift(1).rolling(window, min_periods=1).min()
-        df[f'rolling_max_{window}w'] = df[target_col].shift(1).rolling(window, min_periods=1).max()
-    
-    # Momentum features
-    df['momentum_1w'] = df[target_col].diff(1)
-    df['momentum_4w'] = df[target_col].diff(4)
-    df['momentum_12w'] = df[target_col].diff(12)
-    
-    for period in [1, 4, 12]:
-        pct_change = df[target_col].pct_change(period)
-        pct_change = pct_change.replace([np.inf, -np.inf], np.nan)
-        df[f'pct_change_{period}w'] = pct_change
-    
-    # Weather features
-    if weather_df is not None:
-        weather_aligned = weather_df.reindex(df.index)
-        for col in weather_df.columns:
-            df[col] = weather_aligned[col]
-            df[f'{col}_lag_1w'] = weather_aligned[col].shift(1)
-            df[f'{col}_lag_4w'] = weather_aligned[col].shift(4)
-    
-    # Calendar features
-    df['week_of_year'] = df.index.isocalendar().week.astype(int)
-    df['month'] = df.index.month
-    df['quarter'] = df.index.quarter
-    df['year'] = df.index.year
-    df['week_sin'] = np.sin(2 * np.pi * df['week_of_year'] / 52)
-    df['week_cos'] = np.cos(2 * np.pi * df['week_of_year'] / 52)
-    
-    # Clean up
-    df = df.ffill().bfill()
-    df = df.replace([np.inf, -np.inf], np.nan)
-    df = df.fillna(0)
-    
-    return df
-
-
-def create_weekly_train_test_split(features_df: pd.DataFrame,
-                                   target_col: str,
-                                   split_at_peak: bool = True) -> Dict:
-    """Create train/test split for weekly data."""
-    peak_idx = features_df[target_col].idxmax()
-    peak_loc = features_df.index.get_loc(peak_idx)
-    
-    print(f"Peak found at: {peak_idx.strftime('%Y-%m-%d')}")
-    print(f"Peak value: {features_df[target_col].max():.2f}")
-    
-    train_df = features_df.iloc[:peak_loc + 1]
-    test_df = features_df.iloc[peak_loc + 1:]
-    
-    feature_cols = [c for c in features_df.columns if c != target_col]
-    
-    X_train = train_df[feature_cols]
-    y_train = train_df[target_col]
-    X_test = test_df[feature_cols]
-    y_test = test_df[target_col]
-    
-    print(f"Training samples: {len(X_train)}")
-    print(f"Test samples: {len(X_test)}")
-    
-    return {
-        'X_train': X_train,
-        'y_train': y_train,
-        'X_test': X_test,
-        'y_test': y_test,
-        'train_dates': train_df.index,
-        'test_dates': test_df.index,
-        'peak_date': peak_idx
-    }
+# Import feature preparation from lstm_weekly
+from lstm_weekly import prepare_weekly_features, create_weekly_train_test_split
 
 
 def train_and_evaluate_tft_weekly(split_data: Dict,
@@ -441,7 +303,7 @@ def train_and_evaluate_tft_weekly(split_data: Dict,
                                   hidden_size: int = 64,
                                   attention_heads: int = 4,
                                   epochs: int = 100) -> Dict:
-    """Complete TFT training and evaluation for weekly data."""
+    """Complete TFT training and evaluation."""
     print(f"\n{'='*60}")
     print(f"TRAINING {model_name.upper()}")
     print(f"{'='*60}")
@@ -470,7 +332,7 @@ def train_and_evaluate_tft_weekly(split_data: Dict,
     print("\nTraining TFT...")
     model.train(X_train, y_train, X_test, y_test, verbose=True)
     
-    # Bridge for continuous predictions
+    # Bridge for predictions
     bridge_length = sequence_length
     X_bridge = pd.concat([X_train.iloc[-bridge_length:], X_test])
     
@@ -509,21 +371,14 @@ def plot_tft_predictions_weekly(results: Dict,
                                 train_dates: pd.DatetimeIndex,
                                 title: str = None,
                                 save_path: str = None):
-    """Visualize TFT predictions vs actual for weekly data."""
+    """Visualize TFT predictions."""
     fig, ax = plt.subplots(figsize=(14, 6))
     
-    ax.plot(train_dates, train_y, color='#2A9D8F', 
-            linewidth=1.5, label='Training (Actual)', alpha=0.8)
-    
-    ax.plot(results['test_dates'], results['actual'],
-            color='#457B9D', linewidth=1.5, label='Test (Actual)')
-    
-    ax.plot(results['test_dates'], results['predictions'],
-            color='#E63946', linewidth=1.5, linestyle='--',
-            label='Test (Predicted)', alpha=0.8)
-    
-    ax.axvline(x=train_dates[-1], color='black', 
-               linestyle='--', alpha=0.5, label='Train/Test Split')
+    ax.plot(train_dates, train_y, color='#2A9D8F', linewidth=1.5, label='Training', alpha=0.8)
+    ax.plot(results['test_dates'], results['actual'], color='#457B9D', linewidth=1.5, label='Test (Actual)')
+    ax.plot(results['test_dates'], results['predictions'], color='#E63946', linewidth=1.5, 
+            linestyle='--', label='Test (Predicted)', alpha=0.8)
+    ax.axvline(x=train_dates[-1], color='black', linestyle='--', alpha=0.5)
     
     if title:
         ax.set_title(title, fontsize=14, fontweight='bold')
@@ -533,22 +388,19 @@ def plot_tft_predictions_weekly(results: Dict,
     ax.grid(True, alpha=0.3)
     
     metrics = results['test_metrics']
-    metrics_text = f"R² = {metrics['r2']:.3f}\nRMSE = {metrics['rmse']:.2f}"
-    ax.annotate(metrics_text, xy=(0.02, 0.98), xycoords='axes fraction',
-                fontsize=10, verticalalignment='top',
+    ax.annotate(f"R² = {metrics['r2']:.3f}\nRMSE = {metrics['rmse']:.2f}", 
+                xy=(0.02, 0.98), xycoords='axes fraction', fontsize=10, verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     
     plt.tight_layout()
-    
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"Saved: {save_path}")
-    
     plt.show()
 
 
 # ============================================================
-# MAIN - Run this file to train TFT on weekly data
+# MAIN
 # ============================================================
 if __name__ == "__main__":
     import os
@@ -557,87 +409,55 @@ if __name__ == "__main__":
     os.makedirs('plots', exist_ok=True)
     print(f"Using device: {device}")
     
-    # Load weekly data
-    print("\n" + "="*60)
-    print("LOADING WEEKLY DATA")
-    print("="*60)
-    
+    # Load data
     data = load_all_weekly_data(
         sfs_metadata_path='data/SFS_metadata.csv',
-        weather_path='data/California_weather.csv'
+        weather_path='data/California_weather.csv',
+        google_trends_path='data/google_trends_weekly_smoothed.csv'
     )
     
-    # === ZARA DRESS ===
+    # === ZARA ===
     print("\n" + "="*60)
     print("ZARA DRESS - WEEKLY TFT")
     print("="*60)
     
-    zara_features = prepare_weekly_features(
-        data['sfs'], data['weather'], 'zara_frequency'
-    )
-    print(f"\nZara features shape: {zara_features.shape}")
-    
-    zara_split = create_weekly_train_test_split(
-        zara_features, 'zara_frequency', split_at_peak=True
-    )
+    zara_features = prepare_weekly_features(data['sfs'], data['weather'], data['google'], 'zara_frequency')
+    zara_split = create_weekly_train_test_split(zara_features, 'zara_frequency')
     
     zara_results = train_and_evaluate_tft_weekly(
-        zara_split,
-        model_name="Zara TFT (Weekly SFS + Weather)",
-        sequence_length=12,
-        hidden_size=64,
-        attention_heads=4,
-        epochs=150
+        zara_split, model_name="Zara TFT (Weekly)", sequence_length=12, epochs=150
     )
     
     plot_tft_predictions_weekly(
-        zara_results,
-        zara_split['y_train'],
-        zara_split['train_dates'],
-        title='Zara Dress: Weekly TFT Predictions vs Actual',
-        save_path='plots/zara_tft_weekly_predictions.png'
+        zara_results, zara_split['y_train'], zara_split['train_dates'],
+        title='Zara Dress: Weekly TFT Predictions', save_path='plots/zara_tft_weeklyV2.png'
     )
     
     # Feature importance
     print("\n--- Feature Importance ---")
     importance = zara_results['model'].get_feature_importance(zara_results['X_test'])
-    print(importance.head(10))
+    print(importance.head(15))
     
     zara_results['model'].plot_feature_importance(
         zara_results['X_test'], top_n=15,
-        title='Zara Dress: TFT Feature Importance (Weekly)',
-        save_path='plots/zara_tft_weekly_importance.png'
+        title='Zara: TFT Feature Importance', save_path='plots/zara_tft_importance.png'
     )
     
-    # === CHANEL BAG ===
+    # === CHANEL ===
     print("\n" + "="*60)
     print("CHANEL BAG - WEEKLY TFT")
     print("="*60)
     
-    chanel_features = prepare_weekly_features(
-        data['sfs'], data['weather'], 'chanel_frequency'
-    )
-    print(f"\nChanel features shape: {chanel_features.shape}")
-    
-    chanel_split = create_weekly_train_test_split(
-        chanel_features, 'chanel_frequency', split_at_peak=True
-    )
+    chanel_features = prepare_weekly_features(data['sfs'], data['weather'], data['google'], 'chanel_frequency')
+    chanel_split = create_weekly_train_test_split(chanel_features, 'chanel_frequency')
     
     chanel_results = train_and_evaluate_tft_weekly(
-        chanel_split,
-        model_name="Chanel TFT (Weekly SFS + Weather)",
-        sequence_length=12,
-        hidden_size=64,
-        attention_heads=4,
-        epochs=150
+        chanel_split, model_name="Chanel TFT (Weekly)", sequence_length=12, epochs=150
     )
     
     plot_tft_predictions_weekly(
-        chanel_results,
-        chanel_split['y_train'],
-        chanel_split['train_dates'],
-        title='Chanel Bag: Weekly TFT Predictions vs Actual',
-        save_path='plots/chanel_tft_weekly_predictions.png'
+        chanel_results, chanel_split['y_train'], chanel_split['train_dates'],
+        title='Chanel Bag: Weekly TFT Predictions', save_path='plots/chanel_tft_weeklyV2.png'
     )
     
     # === SUMMARY ===
@@ -646,9 +466,3 @@ if __name__ == "__main__":
     print("="*60)
     print(f"\nZara:   R² = {zara_results['test_metrics']['r2']:.3f}, RMSE = {zara_results['test_metrics']['rmse']:.2f}")
     print(f"Chanel: R² = {chanel_results['test_metrics']['r2']:.3f}, RMSE = {chanel_results['test_metrics']['rmse']:.2f}")
-    
-    print("\n" + "="*60)
-    print("COMPARISON: WEEKLY vs MONTHLY")
-    print("="*60)
-    print("\nWith ~400 weekly samples (vs ~94 monthly):")
-    print("Deep learning models now have sufficient data to learn patterns.")

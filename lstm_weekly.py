@@ -3,20 +3,11 @@ LSTM Model - Weekly Data Version
 
 This module implements LSTM for fashion trend prediction using WEEKLY data.
 
-KEY CHANGES FROM MONTHLY VERSION:
----------------------------------
+KEY FEATURES:
 - ~400 samples instead of ~94 (4x more data)
-- Sequence length adjusted for weekly granularity
-- No Google Trends (only available monthly)
+- Includes Google Trends weekly data
+- Weather data included
 - Feature engineering adapted for weekly patterns
-
-SEQUENCE LENGTH CONSIDERATIONS FOR WEEKLY DATA:
-- 4 weeks = 1 month of context
-- 12 weeks = 3 months (1 quarter)
-- 26 weeks = 6 months (half year)
-- 52 weeks = 1 year (captures seasonality)
-
-Recommended: 12-26 weeks for fashion trends
 """
 
 import numpy as np
@@ -27,7 +18,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import matplotlib.pyplot as plt
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -194,43 +185,14 @@ class LSTMForecaster:
         ).flatten()
         
         return predictions
-    
-    def evaluate(self, X: pd.DataFrame, y: pd.Series) -> Dict:
-        """Evaluate model performance."""
-        predictions = self.predict(X)
-        y_actual = y.values[self.sequence_length:]
-        
-        rmse = np.sqrt(mean_squared_error(y_actual, predictions))
-        mae = mean_absolute_error(y_actual, predictions)
-        r2 = r2_score(y_actual, predictions)
-        
-        mask = y_actual != 0
-        if mask.sum() > 0:
-            mape = np.mean(np.abs((y_actual[mask] - predictions[mask]) / y_actual[mask])) * 100
-        else:
-            mape = np.nan
-        
-        return {
-            'rmse': rmse,
-            'mae': mae,
-            'r2': r2,
-            'mape': mape,
-            'predictions': predictions,
-            'actual': y_actual
-        }
 
 
 def prepare_weekly_features(sfs_df: pd.DataFrame, 
                            weather_df: pd.DataFrame,
+                           google_df: pd.DataFrame,
                            target_col: str) -> pd.DataFrame:
     """
     Prepare features for weekly LSTM/TFT models.
-    
-    Features created:
-    - Lag features (1, 2, 4, 8, 12, 26, 52 weeks)
-    - Rolling statistics (4, 12, 26 week windows)
-    - Weather features
-    - Calendar features
     
     Parameters:
     -----------
@@ -238,6 +200,8 @@ def prepare_weekly_features(sfs_df: pd.DataFrame,
         Weekly SFS data with trend frequencies
     weather_df : DataFrame
         Weekly weather data
+    google_df : DataFrame
+        Weekly Google Trends data
     target_col : str
         Target column name ('zara_frequency' or 'chanel_frequency')
     
@@ -271,25 +235,42 @@ def prepare_weekly_features(sfs_df: pd.DataFrame,
         pct_change = pct_change.replace([np.inf, -np.inf], np.nan)
         df[f'pct_change_{period}w'] = pct_change
     
+    # === GOOGLE TRENDS FEATURES ===
+    if google_df is not None:
+        google_aligned = google_df.reindex(df.index, method='nearest').ffill().bfill()
+        
+        # Determine which trend column to use based on target
+        if 'zara' in target_col.lower():
+            trend_col = 'zara_search_interest'
+        else:
+            trend_col = 'chanel_search_interest'
+        
+        if trend_col in google_aligned.columns:
+            df['search_interest'] = google_aligned[trend_col]
+            df['search_interest_lag_1w'] = df['search_interest'].shift(1)
+            df['search_interest_lag_4w'] = df['search_interest'].shift(4)
+            df['search_interest_rolling_4w'] = df['search_interest'].rolling(4, min_periods=1).mean()
+            df['search_interest_momentum'] = df['search_interest'].diff(1)
+    
     # === WEATHER FEATURES ===
     if weather_df is not None:
-        weather_aligned = weather_df.reindex(df.index)
+        weather_aligned = weather_df.reindex(df.index, method='nearest').ffill().bfill()
         
-        for col in weather_df.columns:
+        for col in weather_aligned.columns:
             df[col] = weather_aligned[col]
             df[f'{col}_lag_1w'] = weather_aligned[col].shift(1)
             df[f'{col}_lag_4w'] = weather_aligned[col].shift(4)
     
+    # === CALENDAR FEATURES ===
     df['week_of_year'] = df.index.isocalendar().week.astype(int)
     df['month'] = df.index.month
     df['quarter'] = df.index.quarter
     df['year'] = df.index.year
-    
     df['week_sin'] = np.sin(2 * np.pi * df['week_of_year'] / 52)
     df['week_cos'] = np.cos(2 * np.pi * df['week_of_year'] / 52)
     
+    # === CLEAN UP ===
     df = df.ffill().bfill()
-    
     df = df.replace([np.inf, -np.inf], np.nan)
     df = df.fillna(0)
     
@@ -299,22 +280,7 @@ def prepare_weekly_features(sfs_df: pd.DataFrame,
 def create_weekly_train_test_split(features_df: pd.DataFrame,
                                    target_col: str,
                                    split_at_peak: bool = True) -> Dict:
-    """
-    Create train/test split for weekly data.
-    
-    Parameters:
-    -----------
-    features_df : DataFrame
-        Features with target column
-    target_col : str
-        Name of target column
-    split_at_peak : bool
-        If True, split at the peak of the trend
-    
-    Returns:
-    --------
-    Dictionary with train/test data
-    """
+    """Create train/test split for weekly data."""
     peak_idx = features_df[target_col].idxmax()
     peak_loc = features_df.index.get_loc(peak_idx)
     
@@ -323,7 +289,7 @@ def create_weekly_train_test_split(features_df: pd.DataFrame,
     
     train_df = features_df.iloc[:peak_loc + 1]
     test_df = features_df.iloc[peak_loc + 1:]
-
+    
     feature_cols = [c for c in features_df.columns if c != target_col]
     
     X_train = train_df[feature_cols]
@@ -352,16 +318,7 @@ def train_and_evaluate_lstm_weekly(split_data: Dict,
                                    num_layers: int = 2,
                                    dropout: float = 0.2,
                                    epochs: int = 100) -> Dict:
-    """
-    Complete LSTM training and evaluation for weekly data.
-    
-    Parameters:
-    -----------
-    split_data : dict
-        Output from create_weekly_train_test_split
-    sequence_length : int
-        Number of past weeks to use (12 = ~3 months)
-    """
+    """Complete LSTM training and evaluation for weekly data."""
     print(f"\n{'='*60}")
     print(f"TRAINING {model_name.upper()}")
     print(f"{'='*60}")
@@ -384,31 +341,28 @@ def train_and_evaluate_lstm_weekly(split_data: Dict,
         dropout=dropout,
         learning_rate=0.001,
         epochs=epochs,
-        batch_size=32  
+        batch_size=32
     )
     
     print("\nTraining LSTM...")
     model.train(X_train, y_train, X_test, y_test, verbose=True)
-
+    
+    # Bridge for continuous predictions
     bridge_length = sequence_length
     X_bridge = pd.concat([X_train.iloc[-bridge_length:], X_test])
-    y_bridge = pd.concat([y_train.iloc[-bridge_length:], y_test])
     
     predictions = model.predict(X_bridge)
     y_actual = y_test.values
     
     if len(predictions) > len(y_actual):
         predictions = predictions[-len(y_actual):]
-  
+    
     rmse = np.sqrt(mean_squared_error(y_actual, predictions))
     mae = mean_absolute_error(y_actual, predictions)
     r2 = r2_score(y_actual, predictions)
     
     mask = y_actual != 0
-    if mask.sum() > 0:
-        mape = np.mean(np.abs((y_actual[mask] - predictions[mask]) / y_actual[mask])) * 100
-    else:
-        mape = np.nan
+    mape = np.mean(np.abs((y_actual[mask] - predictions[mask]) / y_actual[mask])) * 100 if mask.sum() > 0 else np.nan
     
     print("\n--- Test Performance ---")
     print(f"  RMSE: {rmse:.2f}")
@@ -436,14 +390,11 @@ def plot_lstm_predictions_weekly(results: Dict,
     
     ax.plot(train_dates, train_y, color='#2A9D8F', 
             linewidth=1.5, label='Training (Actual)', alpha=0.8)
-    
     ax.plot(results['test_dates'], results['actual'],
             color='#457B9D', linewidth=1.5, label='Test (Actual)')
-    
     ax.plot(results['test_dates'], results['predictions'],
             color='#E63946', linewidth=1.5, linestyle='--',
             label='Test (Predicted)', alpha=0.8)
-    
     ax.axvline(x=train_dates[-1], color='black', 
                linestyle='--', alpha=0.5, label='Train/Test Split')
     
@@ -470,23 +421,24 @@ def plot_lstm_predictions_weekly(results: Dict,
 
 
 # ============================================================
-# MAIN - Run this file to train LSTM on weekly data
+# MAIN
 # ============================================================
 if __name__ == "__main__":
     import os
-    from load_data_weekly import load_all_weekly_data, find_weekly_peak_date
+    from load_data_weekly import load_all_weekly_data
     
     os.makedirs('plots', exist_ok=True)
-    
     print(f"Using device: {device}")
     
+    # Load weekly data
     print("\n" + "="*60)
     print("LOADING WEEKLY DATA")
     print("="*60)
     
     data = load_all_weekly_data(
         sfs_metadata_path='data/SFS_metadata.csv',
-        #weather_path='data/California_weather.csv'
+        weather_path='data/California_weather.csv',
+        google_trends_path='data/google_trends_weekly_smoothed.csv'
     )
     
     # === ZARA DRESS ===
@@ -495,10 +447,10 @@ if __name__ == "__main__":
     print("="*60)
     
     zara_features = prepare_weekly_features(
-        data['sfs'], data['weather'], 'zara_frequency'
+        data['sfs'], data['weather'], data['google'], 'zara_frequency'
     )
     print(f"\nZara features shape: {zara_features.shape}")
-    print(f"Feature columns: {len(zara_features.columns) - 1}")  # -1 for target
+    print(f"Feature columns: {len(zara_features.columns) - 1}")
     
     zara_split = create_weekly_train_test_split(
         zara_features, 'zara_frequency', split_at_peak=True
@@ -506,8 +458,8 @@ if __name__ == "__main__":
     
     zara_results = train_and_evaluate_lstm_weekly(
         zara_split,
-        model_name="Zara LSTM (Weekly SFS + Weather)",
-        sequence_length=12,  # 12 weeks = ~3 months
+        model_name="Zara LSTM (Weekly SFS + Weather + Google)",
+        sequence_length=12,
         hidden_size=64,
         num_layers=2,
         dropout=0.2,
@@ -519,39 +471,39 @@ if __name__ == "__main__":
         zara_split['y_train'],
         zara_split['train_dates'],
         title='Zara Dress: Weekly LSTM Predictions vs Actual',
-        save_path='plots/zara_lstm_weekly_predictions_V1.png'
+        save_path='plots/zara_lstm_weekly_predictions.png'
     )
     
     # === CHANEL BAG ===
     print("\n" + "="*60)
     print("CHANEL BAG - WEEKLY LSTM")
     print("="*60)
- 
+    
     chanel_features = prepare_weekly_features(
-        data['sfs'], data['weather'], 'chanel_frequency'
+        data['sfs'], data['weather'], data['google'], 'chanel_frequency'
     )
     print(f"\nChanel features shape: {chanel_features.shape}")
-
+    
     chanel_split = create_weekly_train_test_split(
         chanel_features, 'chanel_frequency', split_at_peak=True
     )
     
     chanel_results = train_and_evaluate_lstm_weekly(
         chanel_split,
-        model_name="Chanel LSTM (Weekly SFS + Weather)",
+        model_name="Chanel LSTM (Weekly SFS + Weather + Google)",
         sequence_length=12,
         hidden_size=64,
         num_layers=2,
         dropout=0.2,
         epochs=150
     )
-
+    
     plot_lstm_predictions_weekly(
         chanel_results,
         chanel_split['y_train'],
         chanel_split['train_dates'],
         title='Chanel Bag: Weekly LSTM Predictions vs Actual',
-        save_path='plots/chanel_lstm_weekly_predictions_V1.png'
+        save_path='plots/chanel_lstm_weekly_predictions.png'
     )
     
     # === SUMMARY ===
@@ -567,6 +519,6 @@ if __name__ == "__main__":
     print("\nMonthly LSTM (previous results):")
     print("  Zara:   R² = -2.331")
     print("  Chanel: R² = -1.614")
-    print(f"\nWeekly LSTM (current results):")
+    print(f"\nWeekly LSTM with Google Trends (current):")
     print(f"  Zara:   R² = {zara_results['test_metrics']['r2']:.3f}")
     print(f"  Chanel: R² = {chanel_results['test_metrics']['r2']:.3f}")

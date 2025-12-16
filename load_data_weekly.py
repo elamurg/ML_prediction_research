@@ -7,12 +7,12 @@ for improved LSTM and TFT performance with larger sample sizes.
 Key Changes from Monthly:
 - 405 weekly samples vs 94 monthly samples (4x more data)
 - 4-week moving average smoothing to reduce noise
-- Google Trends NOT included (only available monthly - no fake interpolation)
+- Google Trends included 
 - Weather data aggregated to weekly
 
 Note: Google Trends data is only available at monthly granularity.
 Interpolating it to weekly would create artificial data points.
-For weekly models, we use SFS + Weather only.
+For weekly models, we use SFS + Weather + Google Trends.
 """
 
 import pandas as pd
@@ -39,43 +39,35 @@ def load_sfs_weekly(metadata_path: str = 'data/SFS_metadata.csv') -> pd.DataFram
     print("LOADING SFS DATA - WEEKLY AGGREGATION")
     print("=" * 60)
     
-    # Load raw metadata
     df = pd.read_csv(metadata_path)
     print(f"\nRaw metadata records: {len(df)}")
     
-    # Parse dates
     df['time'] = df['time'].str.replace("Updated on ", "", regex=False)
     df['date'] = pd.to_datetime(df['time'], errors='coerce')
     df['tags'] = df['tags'].fillna("").str.lower()
     
-    # Define trend items
     trend_items = {
         "zara_frequency": ["zara", "dress"],
         "chanel_frequency": ["chanel", "bag"]
     }
     
-    # Tag matching
     for trend_label, keywords in trend_items.items():
         df[trend_label] = df['tags'].apply(
             lambda x: 1 if all(kw in x for kw in keywords) else 0)
-    
-    # Print match counts
+   
     print(f"\nTrend matches:")
     print(f"  Zara dress:  {df['zara_frequency'].sum()} posts")
     print(f"  Chanel bag:  {df['chanel_frequency'].sum()} posts")
-    
-    # Aggregate to daily first
+   
     daily = df.groupby('date')[list(trend_items.keys())].sum()
     daily = daily.asfreq('D', fill_value=0)
     
-    # Aggregate to weekly
     weekly = daily.resample('W').sum()
     
     print(f"\nWeekly aggregation:")
     print(f"  Total weeks: {len(weekly)}")
     print(f"  Date range: {weekly.index.min().strftime('%Y-%m-%d')} to {weekly.index.max().strftime('%Y-%m-%d')}")
-    
-    # Apply 4-week moving average smoothing
+   
     weekly['zara_frequency'] = weekly['zara_frequency'].rolling(4, min_periods=1).mean()
     weekly['chanel_frequency'] = weekly['chanel_frequency'].rolling(4, min_periods=1).mean()
     
@@ -83,7 +75,6 @@ def load_sfs_weekly(metadata_path: str = 'data/SFS_metadata.csv') -> pd.DataFram
     print(f"  Zara zeros:   {(weekly['zara_frequency'] == 0).sum()}")
     print(f"  Chanel zeros: {(weekly['chanel_frequency'] == 0).sum()}")
     
-    # Ensure datetime index
     weekly.index = pd.to_datetime(weekly.index)
     weekly.index.name = 'date'
     
@@ -112,31 +103,26 @@ def load_weather_weekly(weather_path: str = 'data/California_weather.csv') -> pd
     print("LOADING WEATHER DATA - WEEKLY AGGREGATION")
     print("=" * 60)
     
-    # Weather CSV uses semicolon delimiter
     df = pd.read_csv(weather_path, delimiter=';')
     print(f"\nRaw data shape: {df.shape}")
     print(f"Columns: {df.columns.tolist()}")
     
-    # Parse datetime - handle different possible formats
     if 'dt_iso' in df.columns:
-        # Format: "2008-06-01 00:00:00 +0000 UTC" or similar
+        
         df['datetime'] = pd.to_datetime(df['dt_iso'].str[:19], errors='coerce')
     elif 'date' in df.columns:
         df['datetime'] = pd.to_datetime(df['date'], errors='coerce')
     elif 'dt' in df.columns:
-        # Unix timestamp
         df['datetime'] = pd.to_datetime(df['dt'], unit='s', errors='coerce')
     else:
         raise ValueError(f"Cannot find date column. Available: {df.columns.tolist()}")
     
-    # Extract date for grouping
     df['date'] = df['datetime'].dt.date
     df['date'] = pd.to_datetime(df['date'])
     
     print(f"Date range (hourly): {df['datetime'].min()} to {df['datetime'].max()}")
     print(f"Total hourly records: {len(df)}")
     
-    # Identify weather columns - handle different naming conventions
     temp_col = None
     humidity_col = None
     rain_col = None
@@ -155,117 +141,76 @@ def load_weather_weekly(weather_path: str = 'data/California_weather.csv') -> pd
     print(f"  Humidity: {humidity_col}")
     print(f"  Rainfall: {rain_col}")
     
-    # Build aggregation dict based on available columns
-    agg_dict_daily = {}
-    agg_dict_weekly = {}
+    agg_dict = {}
     rename_dict = {}
     
     if temp_col:
-        agg_dict_daily[temp_col] = 'mean'
-        agg_dict_weekly[temp_col] = 'mean'
+        agg_dict[temp_col] = 'mean'
         rename_dict[temp_col] = 'avg_temperature'
     
     if humidity_col:
-        agg_dict_daily[humidity_col] = 'mean'
-        agg_dict_weekly[humidity_col] = 'mean'
+        agg_dict[humidity_col] = 'mean'
         rename_dict[humidity_col] = 'avg_humidity'
     
     if rain_col:
-        # Fill NaN rain values with 0 (no rain)
         df[rain_col] = df[rain_col].fillna(0)
-        agg_dict_daily[rain_col] = 'sum'
-        agg_dict_weekly[rain_col] = 'sum'
+        agg_dict[rain_col] = 'sum'
         rename_dict[rain_col] = 'total_rainfall'
     
-    if not agg_dict_daily:
+    if not agg_dict:
         raise ValueError("No weather columns found!")
     
-    # Step 1: Aggregate hourly -> daily
-    daily = df.groupby('date').agg(agg_dict_daily)
-    print(f"\nDaily aggregation: {len(daily)} days")
-    
-    # Step 2: Aggregate daily -> weekly
-    weekly = daily.resample('W').agg(agg_dict_weekly)
-    print(f"Weekly aggregation: {len(weekly)} weeks")
-    
-    # Rename columns
+    daily = df.groupby('date').agg(agg_dict)
+    weekly = daily.resample('W').mean()
     weekly = weekly.rename(columns=rename_dict)
+
+    if 'avg_temperature' in weekly.columns and weekly['avg_temperature'].mean() > 200:
+        weekly['avg_temperature'] = weekly['avg_temperature'] - 273.15
     
-    # Convert temperature from Kelvin to Celsius if needed
-    if 'avg_temperature' in weekly.columns:
-        if weekly['avg_temperature'].mean() > 200:
-            weekly['avg_temperature'] = weekly['avg_temperature'] - 273.15
-            print("Converted temperature from Kelvin to Celsius")
-    
-    # Fill any missing values
     weekly = weekly.ffill().bfill()
     
-    print(f"\nFinal weekly data:")
-    print(f"  Shape: {weekly.shape}")
-    print(f"  Date range: {weekly.index.min().strftime('%Y-%m-%d')} to {weekly.index.max().strftime('%Y-%m-%d')}")
-    print(f"  Columns: {weekly.columns.tolist()}")
+    print(f"Weekly samples: {len(weekly)}")
     
     return weekly
 
-
-def align_weekly_datasets(sfs_df: pd.DataFrame, 
-                          weather_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def load_google_trends_weekly(google_path: str = 'data/google_trends_weekly_smoothed.csv') -> pd.DataFrame:
     """
-    Align SFS and Weather datasets to a common weekly date range.
-    
-    Note: Google Trends is excluded as it's only available monthly.
+    Load weekly Google Trends data.
     
     Parameters:
     -----------
-    sfs_df : DataFrame
-        Weekly SFS data
-    weather_df : DataFrame
-        Weekly weather data
+    google_path : str
+        Path to weekly Google Trends CSV
     
     Returns:
     --------
-    Tuple of aligned DataFrames (sfs, weather)
+    DataFrame with weekly search interest
     """
     print("\n" + "=" * 60)
-    print("ALIGNING DATASETS TO COMMON WEEKLY RANGE")
+    print("LOADING GOOGLE TRENDS - WEEKLY")
     print("=" * 60)
     
-    # Find common date range
-    start_date = max(sfs_df.index.min(), weather_df.index.min())
-    end_date = min(sfs_df.index.max(), weather_df.index.max())
+    df = pd.read_csv(google_path, parse_dates=['date'], index_col='date')
     
-    print(f"\nIndividual date ranges:")
-    print(f"  SFS:     {sfs_df.index.min().strftime('%Y-%m-%d')} to {sfs_df.index.max().strftime('%Y-%m-%d')}")
-    print(f"  Weather: {weather_df.index.min().strftime('%Y-%m-%d')} to {weather_df.index.max().strftime('%Y-%m-%d')}")
+    print(f"\nGoogle Trends data:")
+    print(f"  Shape: {df.shape}")
+    print(f"  Date range: {df.index.min().strftime('%Y-%m-%d')} to {df.index.max().strftime('%Y-%m-%d')}")
+    print(f"  Columns: {df.columns.tolist()}")
     
-    print(f"\nCommon range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+    if 'zara_search_interest' not in df.columns:
+        for col in df.columns:
+            if 'zara' in col.lower():
+                df = df.rename(columns={col: 'zara_search_interest'})
+            if 'chanel' in col.lower():
+                df = df.rename(columns={col: 'chanel_search_interest'})
     
-    # Filter to common range
-    sfs_aligned = sfs_df[(sfs_df.index >= start_date) & (sfs_df.index <= end_date)].copy()
-    weather_aligned = weather_df[(weather_df.index >= start_date) & (weather_df.index <= end_date)].copy()
-    
-    # Ensure same index
-    common_index = sfs_aligned.index.intersection(weather_aligned.index)
-    
-    sfs_aligned = sfs_aligned.loc[common_index]
-    weather_aligned = weather_aligned.loc[common_index]
-    
-    print(f"\nAligned dataset sizes:")
-    print(f"  SFS:     {len(sfs_aligned)} weeks")
-    print(f"  Weather: {len(weather_aligned)} weeks")
-    
-    return sfs_aligned, weather_aligned
-
+    return df
 
 def load_all_weekly_data(sfs_metadata_path: str = 'data/SFS_metadata.csv',
-                         weather_path: str = 'data/California_weather.csv') -> Dict:
+                         weather_path: str = 'data/California_weather.csv',
+                         google_trends_path: str = 'data/google_trends_weekly_smoothed.csv') -> Dict:
     """
     Load all datasets with weekly aggregation.
-    
-    This is the main entry point for the weekly data pipeline.
-    
-    Note: Google Trends is NOT included because it's only available monthly.
-    Interpolating monthly to weekly would create artificial data points.
     
     Parameters:
     -----------
@@ -273,18 +218,39 @@ def load_all_weekly_data(sfs_metadata_path: str = 'data/SFS_metadata.csv',
         Path to SFS metadata CSV
     weather_path : str
         Path to California weather CSV
+    google_trends_path : str
+        Path to weekly Google Trends CSV
     
     Returns:
     --------
-    Dictionary with 'sfs' and 'weather' DataFrames
-    (No 'google' key - not available at weekly granularity)
+    Dictionary with 'sfs', 'weather', and 'google' DataFrames
     """
     # Load individual datasets
     sfs_df = load_sfs_weekly(sfs_metadata_path)
     weather_df = load_weather_weekly(weather_path)
+    google_df = load_google_trends_weekly(google_trends_path)
     
-    # Align to common range
-    sfs_aligned, weather_aligned = align_weekly_datasets(sfs_df, weather_df)
+    # Find common date range across all three datasets
+    start_date = max(sfs_df.index.min(), weather_df.index.min(), google_df.index.min())
+    end_date = min(sfs_df.index.max(), weather_df.index.max(), google_df.index.max())
+    
+    print("\n" + "=" * 60)
+    print("ALIGNING DATASETS")
+    print("=" * 60)
+    print(f"\nCommon date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+    
+    # Filter to common range
+    sfs_aligned = sfs_df[(sfs_df.index >= start_date) & (sfs_df.index <= end_date)].copy()
+    weather_aligned = weather_df[(weather_df.index >= start_date) & (weather_df.index <= end_date)].copy()
+    google_aligned = google_df[(google_df.index >= start_date) & (google_df.index <= end_date)].copy()
+    
+    # Align Google Trends to SFS index (nearest match for any misaligned dates)
+    google_aligned = google_aligned.reindex(sfs_aligned.index, method='nearest')
+    google_aligned = google_aligned.ffill().bfill()
+    
+    # Align weather to SFS index
+    weather_aligned = weather_aligned.reindex(sfs_aligned.index, method='nearest')
+    weather_aligned = weather_aligned.ffill().bfill()
     
     print("\n" + "=" * 60)
     print("WEEKLY DATA LOADING COMPLETE")
@@ -293,39 +259,25 @@ def load_all_weekly_data(sfs_metadata_path: str = 'data/SFS_metadata.csv',
     print(f"\nFinal dataset sizes:")
     print(f"  SFS:     {len(sfs_aligned)} weeks, {sfs_aligned.shape[1]} columns")
     print(f"  Weather: {len(weather_aligned)} weeks, {weather_aligned.shape[1]} columns")
+    print(f"  Google:  {len(google_aligned)} weeks, {google_aligned.shape[1]} columns")
     
     print(f"\nCompared to monthly (94 samples), you now have {len(sfs_aligned)} samples")
     print(f"That's {len(sfs_aligned) / 94:.1f}x more data for LSTM/TFT!")
     
-    print(f"\nNote: Google Trends NOT included (only available monthly)")
-    
     return {
         'sfs': sfs_aligned,
-        'weather': weather_aligned
-        # No 'google' key - not available at weekly granularity
+        'weather': weather_aligned,
+        'google': google_aligned
     }
 
 
 def find_weekly_peak_date(df: pd.DataFrame, target_column: str) -> pd.Timestamp:
     """
     Find the date when a trend reaches its peak value.
-    
-    Parameters:
-    -----------
-    df : DataFrame
-        Weekly data with datetime index
-    target_column : str
-        Column name of the target variable
-    
-    Returns:
-    --------
-    Timestamp of the peak date
     """
     peak_date = df[target_column].idxmax()
     peak_value = df[target_column].max()
-    
     print(f"Peak found: {peak_date.strftime('%Y-%m-%d')} with value {peak_value:.2f}")
-    
     return peak_date
 
 
@@ -338,7 +290,8 @@ if __name__ == "__main__":
     # Load all weekly data
     data = load_all_weekly_data(
         sfs_metadata_path='data/SFS_metadata.csv',
-        weather_path='data/California_weather.csv'
+        weather_path='data/California_weather.csv',
+        google_trends_path='data/google_trends_weekly_smoothed.csv'
     )
     
     # Print sample data
@@ -352,6 +305,9 @@ if __name__ == "__main__":
     print("\nWeather Weekly (first 10 rows):")
     print(data['weather'].head(10))
     
+    print("\nGoogle Trends Weekly (first 10 rows):")
+    print(data['google'].head(10))
+    
     # Find peaks
     print("\n" + "=" * 60)
     print("PEAK DETECTION")
@@ -363,57 +319,35 @@ if __name__ == "__main__":
     print("\nChanel Bag:")
     chanel_peak = find_weekly_peak_date(data['sfs'], 'chanel_frequency')
     
-    # Calculate train/test split sizes
-    print("\n" + "=" * 60)
-    print("TRAIN/TEST SPLIT PREVIEW (at peak)")
-    print("=" * 60)
+    # Plot
+    fig, axes = plt.subplots(3, 1, figsize=(14, 12))
     
-    zara_peak_idx = data['sfs'].index.get_loc(zara_peak)
-    chanel_peak_idx = data['sfs'].index.get_loc(chanel_peak)
-    
-    print(f"\nZara (split at peak):")
-    print(f"  Training: {zara_peak_idx + 1} weeks")
-    print(f"  Testing:  {len(data['sfs']) - zara_peak_idx - 1} weeks")
-    
-    print(f"\nChanel (split at peak):")
-    print(f"  Training: {chanel_peak_idx + 1} weeks")
-    print(f"  Testing:  {len(data['sfs']) - chanel_peak_idx - 1} weeks")
-    
-    # Compare to monthly
-    print("\n" + "=" * 60)
-    print("COMPARISON: WEEKLY vs MONTHLY SAMPLE SIZES")
-    print("=" * 60)
-    print(f"\n{'':20} {'Monthly':>12} {'Weekly':>12} {'Improvement':>12}")
-    print("-" * 60)
-    print(f"{'Zara Train':20} {'39':>12} {zara_peak_idx + 1:>12} {(zara_peak_idx + 1) / 39:.1f}x")
-    print(f"{'Zara Test':20} {'43':>12} {len(data['sfs']) - zara_peak_idx - 1:>12} {(len(data['sfs']) - zara_peak_idx - 1) / 43:.1f}x")
-    print(f"{'Chanel Train':20} {'49':>12} {chanel_peak_idx + 1:>12} {(chanel_peak_idx + 1) / 49:.1f}x")
-    print(f"{'Chanel Test':20} {'19':>12} {len(data['sfs']) - chanel_peak_idx - 1:>12} {(len(data['sfs']) - chanel_peak_idx - 1) / 19:.1f}x")
-    
-    # Plot the weekly data
-    fig, axes = plt.subplots(2, 1, figsize=(14, 10))
-    
-    # Zara
+    # SFS
     axes[0].plot(data['sfs'].index, data['sfs']['zara_frequency'], 
                  color='#2A9D8F', linewidth=2, label='Zara Dress')
-    axes[0].axvline(x=zara_peak, color='red', linestyle='--', label=f'Peak: {zara_peak.strftime("%Y-%m-%d")}')
-    axes[0].set_title('Zara Dress - Weekly Frequency (4-week MA)', fontsize=14, fontweight='bold')
-    axes[0].set_ylabel('Frequency')
+    axes[0].plot(data['sfs'].index, data['sfs']['chanel_frequency'], 
+                 color='#E76F51', linewidth=2, label='Chanel Bag')
+    axes[0].set_title('SFS Weekly Frequency (4-week MA)', fontsize=14, fontweight='bold')
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
     
-    # Chanel
-    axes[1].plot(data['sfs'].index, data['sfs']['chanel_frequency'], 
+    # Google Trends
+    axes[1].plot(data['google'].index, data['google']['zara_search_interest'], 
+                 color='#2A9D8F', linewidth=2, label='Zara Dress')
+    axes[1].plot(data['google'].index, data['google']['chanel_search_interest'], 
                  color='#E76F51', linewidth=2, label='Chanel Bag')
-    axes[1].axvline(x=chanel_peak, color='red', linestyle='--', label=f'Peak: {chanel_peak.strftime("%Y-%m-%d")}')
-    axes[1].set_title('Chanel Bag - Weekly Frequency (4-week MA)', fontsize=14, fontweight='bold')
-    axes[1].set_xlabel('Date')
-    axes[1].set_ylabel('Frequency')
+    axes[1].set_title('Google Trends Weekly Search Interest', fontsize=14, fontweight='bold')
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)
     
-    plt.tight_layout()
-    plt.savefig('plots/weekly_trends_with_peaks.png', dpi=150)
-    print("\nSaved: plots/weekly_trends_with_peaks.png")
-    plt.show()
+    # Weather
+    axes[2].plot(data['weather'].index, data['weather']['avg_temperature'], 
+                 color='#457B9D', linewidth=2)
+    axes[2].set_title('Weather - Weekly Avg Temperature', fontsize=14, fontweight='bold')
+    axes[2].set_ylabel('Temperature (°C)')
+    axes[2].grid(True, alpha=0.3)
     
+    plt.tight_layout()
+    plt.savefig('plots/weekly_all_data.png', dpi=150)
+    print("\nSaved: plots/weekly_all_data.png")
+    plt.show()
