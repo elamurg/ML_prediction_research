@@ -38,13 +38,11 @@ import os
 import warnings
 warnings.filterwarnings('ignore')
 
-# Configuration
 RUN_EDA = True  # Set to True to run exploratory data analysis
 SEQUENCE_LENGTH = 6  # Lookback window for LSTM/TFT (in months)
 TRAIN_FRACTION = 0.75  # Fraction of pre-peak data for training
 EPOCHS = 100  # Training epochs for neural networks
 
-# Create output directories
 os.makedirs('plots', exist_ok=True)
 os.makedirs('results', exist_ok=True)
 
@@ -62,7 +60,7 @@ def main():
     print("STAGE 1: DATA LOADING")
     print("="*70)
     
-    from stage1_data_loading import load_all_data
+    from load_data import load_all_data
     
     data = load_all_data(
         sfs_path='trend_counts_over_time.csv',
@@ -76,7 +74,7 @@ def main():
         print("STAGE 2: EXPLORATORY DATA ANALYSIS")
         print("="*70)
         
-        from stage2_eda import run_full_eda
+        from eda import run_full_eda
         
         eda_results = run_full_eda(
             data['sfs'],
@@ -90,7 +88,7 @@ def main():
     print("STAGE 3: FEATURE ENGINEERING")
     print("="*70)
     
-    from stage3_feature_engineering import prepare_all_model_features
+    from feature_eng import prepare_all_model_features
     
     feature_datasets = prepare_all_model_features(
         data['sfs'],
@@ -103,7 +101,7 @@ def main():
     print("STAGE 4: TRAIN/TEST SPLIT")
     print("="*70)
     
-    from stage4_train_test_split import prepare_all_splits
+    from train_test import prepare_all_splits
     
     splits = prepare_all_splits(
         feature_datasets,
@@ -118,11 +116,10 @@ def main():
     print("STAGE 5: MODEL TRAINING")
     print("="*70)
     
-    from stage5a_xgboost import train_and_evaluate_xgboost, plot_predictions
-    from stage5b_lstm import train_and_evaluate_lstm, plot_lstm_predictions
-    from stage5c_tft import train_and_evaluate_tft, plot_tft_predictions
+    from xgboost import train_and_evaluate_xgboost, plot_predictions
+    from lstm import train_and_evaluate_lstm, plot_lstm_predictions
+    from tft import train_and_evaluate_tft, plot_tft_predictions
     
-    # Store all results
     all_results = {
         'zara': {},
         'chanel': {}
@@ -133,7 +130,6 @@ def main():
     print("ZARA DRESS MODELS")
     print("-"*50)
     
-    # XGBoost
     zara_xgb = train_and_evaluate_xgboost(
         splits['zara_xgb'],
         model_name="Zara XGBoost (SFS only)"
@@ -146,7 +142,6 @@ def main():
         save_path='plots/zara_xgb_predictions.png'
     )
     
-    # LSTM
     zara_lstm = train_and_evaluate_lstm(
         splits['zara_lstm'],
         model_name="Zara LSTM (SFS + Google)",
@@ -163,7 +158,6 @@ def main():
         save_path='plots/zara_lstm_predictions.png'
     )
     
-    # TFT
     zara_tft = train_and_evaluate_tft(
         splits['zara_tft'],
         model_name="Zara TFT (All Data)",
@@ -184,8 +178,7 @@ def main():
     print("\n" + "-"*50)
     print("CHANEL BAG MODELS")
     print("-"*50)
-    
-    # XGBoost
+
     chanel_xgb = train_and_evaluate_xgboost(
         splits['chanel_xgb'],
         model_name="Chanel XGBoost (SFS only)"
@@ -198,7 +191,6 @@ def main():
         save_path='plots/chanel_xgb_predictions.png'
     )
     
-    # LSTM
     chanel_lstm = train_and_evaluate_lstm(
         splits['chanel_lstm'],
         model_name="Chanel LSTM (SFS + Google)",
@@ -215,7 +207,6 @@ def main():
         save_path='plots/chanel_lstm_predictions.png'
     )
     
-    # TFT
     chanel_tft = train_and_evaluate_tft(
         splits['chanel_tft'],
         model_name="Chanel TFT (All Data)",
@@ -237,27 +228,23 @@ def main():
     print("STAGE 6: MODEL COMPARISON")
     print("="*70)
     
-    from stage6_evaluation import (
+    from evaluation import (
         create_comparison_table,
         create_summary_visualization,
         print_analysis_summary
     )
-    
-    # Create comparison tables
+
     zara_comparison = create_comparison_table(all_results['zara'])
     chanel_comparison = create_comparison_table(all_results['chanel'])
-    
-    # Print summary
+  
     print_analysis_summary(zara_comparison, chanel_comparison)
     
-    # Create summary visualization
     create_summary_visualization(
         all_results['zara'],
         all_results['chanel'],
         save_path='plots/model_comparison_summary.png'
     )
     
-    # Save results
     zara_comparison.to_csv('results/zara_model_comparison.csv')
     chanel_comparison.to_csv('results/chanel_model_comparison.csv')
     

@@ -128,12 +128,12 @@ def print_analysis_summary(zara_comparison: pd.DataFrame, chanel_comparison: pd.
 # ============================================================
 if __name__ == "__main__":
     import os
-    from stage1_data_loading import load_all_data
-    from stage3_feature_engineering import prepare_all_model_features
-    from stage4_train_test_split import prepare_all_splits
-    from stage5a_xgboost import train_and_evaluate_xgboost
-    from stage5b_lstm import train_and_evaluate_lstm
-    from stage5c_tft import train_and_evaluate_tft
+    from load_data import load_all_data
+    from feature_eng import prepare_all_model_features
+    from train_test import prepare_all_splits
+    from xgboost import train_and_evaluate_xgboost
+    from lstm import train_and_evaluate_lstm
+    from tft import train_and_evaluate_tft
     
     os.makedirs('plots', exist_ok=True)
     os.makedirs('results', exist_ok=True)

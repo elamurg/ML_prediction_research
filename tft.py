@@ -1,6 +1,6 @@
 """
-Stage 5C: Temporal Fusion Transformer (TFT) Model
-==================================================
+Temporal Fusion Transformer (TFT) Model
+
 
 This module implements a simplified TFT for fashion trend prediction.
 
