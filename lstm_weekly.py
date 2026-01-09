@@ -1,13 +1,39 @@
 """
 LSTM Model - Weekly Data Version
 
-This module implements LSTM for fashion trend prediction using WEEKLY data.
+This module implements LSTM for fashion trend prediction using WEEKLY data
+from weekly_trend_counts.csv (interpolated columns).
 
 KEY FEATURES:
-- ~400 samples instead of ~94 (4x more data)
+- ~400 samples instead of ~94 (4x more data than monthly)
+- Uses interpolated trend counts for smoother signal
 - Includes Google Trends weekly data
 - Weather data included
 - Feature engineering adapted for weekly patterns
+
+LSTM (Long Short-Term Memory) EXPLAINED:
+----------------------------------------
+
+WHY LSTM FOR TIME SERIES?
+Regular neural networks treat each input independently.
+LSTMs have memory - they can remember important patterns from
+earlier in the sequence and use that to inform predictions.
+
+THE MEMORY MECHANISM:
+LSTMs have three "gates" that control information flow:
+1. FORGET GATE: Decides what to throw away from memory
+2. INPUT GATE: Decides what new information to store
+3. OUTPUT GATE: Decides what to output based on memory
+
+ANALOGY:
+Think of reading a book:
+- You don't remember every word (forget gate)
+- Important plot points stick (input gate)
+- When someone asks about the book, you summarize key points (output gate)
+
+WHY LSTM vs XGBoost FOR TIME SERIES?
+- XGBoost: Fast, interpretable, but needs manual feature engineering
+- LSTM: Learns temporal patterns automatically, but needs more data
 """
 
 import numpy as np
@@ -26,7 +52,14 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 class LSTMModel(nn.Module):
-    """LSTM Neural Network for time series prediction."""
+    """
+    LSTM Neural Network for time series prediction.
+    
+    Architecture:
+    - LSTM layers: Process sequences and maintain memory
+    - Dropout: Prevent overfitting
+    - Dense layers: Transform LSTM output to prediction
+    """
     
     def __init__(self, input_size: int, hidden_size: int = 64, 
                  num_layers: int = 2, dropout: float = 0.2):
@@ -49,7 +82,9 @@ class LSTMModel(nn.Module):
         self.relu = nn.ReLU()
     
     def forward(self, x):
+        # x shape: (batch, sequence_length, features)
         lstm_out, (h_n, c_n) = self.lstm(x)
+        # Take last timestep output
         last_output = lstm_out[:, -1, :]
         out = self.dropout(last_output)
         out = self.relu(self.fc1(out))
@@ -60,7 +95,19 @@ class LSTMModel(nn.Module):
 def create_sequences(features: np.ndarray, 
                     target: np.ndarray, 
                     sequence_length: int = 12) -> Tuple[np.ndarray, np.ndarray]:
-    """Create sequences for LSTM training."""
+    """
+    Create sequences for LSTM training.
+    
+    WHAT THIS DOES:
+    Transforms flat data into overlapping windows.
+    
+    Example with sequence_length=3:
+    Input: [1, 2, 3, 4, 5, 6]
+    Output X: [[1,2,3], [2,3,4], [3,4,5]]
+    Output y: [4, 5, 6]
+    
+    Each X sequence is used to predict the next y value.
+    """
     X, y = [], []
     for i in range(len(features) - sequence_length):
         X.append(features[i:i + sequence_length])
@@ -69,13 +116,31 @@ def create_sequences(features: np.ndarray,
 
 
 class LSTMForecaster:
-    """LSTM model wrapper for fashion trend forecasting."""
+    """
+    LSTM model wrapper for fashion trend forecasting.
+    
+    Handles:
+    - Data scaling (important for neural networks)
+    - Sequence creation
+    - Training with validation
+    - Prediction with proper inverse scaling
+    """
     
     def __init__(self, sequence_length: int = 12, hidden_size: int = 64,
                  num_layers: int = 2, dropout: float = 0.2,
                  learning_rate: float = 0.001, epochs: int = 100,
                  batch_size: int = 16):
-        
+        """
+        HYPERPARAMETER EXPLANATIONS:
+        ----------------------------
+        sequence_length: How many past weeks to look at (12 = ~3 months)
+        hidden_size: LSTM memory capacity (64 neurons)
+        num_layers: Depth of LSTM stack (2 layers)
+        dropout: Regularization strength (0.2 = drop 20% of connections)
+        learning_rate: Step size for optimization (0.001)
+        epochs: Number of training passes (100)
+        batch_size: Samples per gradient update (16)
+        """
         self.sequence_length = sequence_length
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -92,7 +157,13 @@ class LSTMForecaster:
     
     def prepare_data(self, X: pd.DataFrame, y: pd.Series, 
                     fit_scalers: bool = True) -> Tuple[np.ndarray, np.ndarray]:
-        """Prepare data for LSTM: scale and create sequences."""
+        """
+        Prepare data for LSTM: scale and create sequences.
+        
+        WHY SCALING?
+        Neural networks work best when inputs are in similar ranges.
+        MinMaxScaler transforms all values to [0, 1].
+        """
         X_array = X.values
         y_array = y.values.reshape(-1, 1)
         
@@ -112,19 +183,24 @@ class LSTMForecaster:
         """Train the LSTM model."""
         self.feature_names = list(X_train.columns)
         
+        # Prepare training data
         X_train_seq, y_train_seq = self.prepare_data(X_train, y_train, fit_scalers=True)
         
+        # Prepare validation data if provided
         if X_val is not None and y_val is not None:
             X_val_seq, y_val_seq = self.prepare_data(X_val, y_val, fit_scalers=False)
             X_val_tensor = torch.FloatTensor(X_val_seq).to(device)
             y_val_tensor = torch.FloatTensor(y_val_seq).to(device)
         
+        # Convert to tensors
         X_train_tensor = torch.FloatTensor(X_train_seq).to(device)
         y_train_tensor = torch.FloatTensor(y_train_seq).to(device)
         
+        # Create data loader
         train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
         train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
         
+        # Initialize model
         input_size = X_train.shape[1]
         self.model = LSTMModel(
             input_size=input_size,
@@ -180,6 +256,7 @@ class LSTMForecaster:
         with torch.no_grad():
             predictions_scaled = self.model(X_tensor).cpu().numpy()
         
+        # Inverse transform to get actual values
         predictions = self.target_scaler.inverse_transform(
             predictions_scaled.reshape(-1, 1)
         ).flatten()
@@ -187,17 +264,20 @@ class LSTMForecaster:
         return predictions
 
 
-def prepare_weekly_features(sfs_df: pd.DataFrame, 
-                           weather_df: pd.DataFrame,
-                           google_df: pd.DataFrame,
-                           target_col: str) -> pd.DataFrame:
+def prepare_lstm_features(sfs_df: pd.DataFrame, 
+                         weather_df: pd.DataFrame,
+                         google_df: pd.DataFrame,
+                         target_col: str) -> pd.DataFrame:
     """
-    Prepare features for weekly LSTM/TFT models.
+    Prepare features for weekly LSTM model.
+    
+    Similar to XGBoost features but LSTM can learn temporal patterns
+    automatically, so we include fewer engineered features.
     
     Parameters:
     -----------
     sfs_df : DataFrame
-        Weekly SFS data with trend frequencies
+        Weekly SFS data with trend frequencies (from weekly_trend_counts.csv)
     weather_df : DataFrame
         Weekly weather data
     google_df : DataFrame
@@ -239,7 +319,6 @@ def prepare_weekly_features(sfs_df: pd.DataFrame,
     if google_df is not None:
         google_aligned = google_df.reindex(df.index, method='nearest').ffill().bfill()
         
-        # Determine which trend column to use based on target
         if 'zara' in target_col.lower():
             trend_col = 'zara_search_interest'
         else:
@@ -277,18 +356,24 @@ def prepare_weekly_features(sfs_df: pd.DataFrame,
     return df
 
 
-def create_weekly_train_test_split(features_df: pd.DataFrame,
-                                   target_col: str,
-                                   split_at_peak: bool = True) -> Dict:
+def create_train_test_split(features_df: pd.DataFrame,
+                            target_col: str,
+                            split_at_peak: bool = True,
+                            train_fraction: float = 0.75) -> Dict:
     """Create train/test split for weekly data."""
-    peak_idx = features_df[target_col].idxmax()
-    peak_loc = features_df.index.get_loc(peak_idx)
-    
-    print(f"Peak found at: {peak_idx.strftime('%Y-%m-%d')}")
-    print(f"Peak value: {features_df[target_col].max():.2f}")
-    
-    train_df = features_df.iloc[:peak_loc + 1]
-    test_df = features_df.iloc[peak_loc + 1:]
+    if split_at_peak:
+        peak_idx = features_df[target_col].idxmax()
+        peak_loc = features_df.index.get_loc(peak_idx)
+        
+        print(f"Peak found at: {peak_idx.strftime('%Y-%m-%d')}")
+        print(f"Peak value: {features_df[target_col].max():.2f}")
+        
+        train_df = features_df.iloc[:peak_loc + 1]
+        test_df = features_df.iloc[peak_loc + 1:]
+    else:
+        split_point = int(len(features_df) * train_fraction)
+        train_df = features_df.iloc[:split_point]
+        test_df = features_df.iloc[split_point:]
     
     feature_cols = [c for c in features_df.columns if c != target_col]
     
@@ -307,17 +392,17 @@ def create_weekly_train_test_split(features_df: pd.DataFrame,
         'y_test': y_test,
         'train_dates': train_df.index,
         'test_dates': test_df.index,
-        'peak_date': peak_idx
+        'peak_date': peak_idx if split_at_peak else None
     }
 
 
-def train_and_evaluate_lstm_weekly(split_data: Dict, 
-                                   model_name: str = "LSTM",
-                                   sequence_length: int = 12,
-                                   hidden_size: int = 64,
-                                   num_layers: int = 2,
-                                   dropout: float = 0.2,
-                                   epochs: int = 100) -> Dict:
+def train_and_evaluate_lstm(split_data: Dict, 
+                            model_name: str = "LSTM",
+                            sequence_length: int = 12,
+                            hidden_size: int = 64,
+                            num_layers: int = 2,
+                            dropout: float = 0.2,
+                            epochs: int = 100) -> Dict:
     """Complete LSTM training and evaluation for weekly data."""
     print(f"\n{'='*60}")
     print(f"TRAINING {model_name.upper()}")
@@ -347,16 +432,19 @@ def train_and_evaluate_lstm_weekly(split_data: Dict,
     print("\nTraining LSTM...")
     model.train(X_train, y_train, X_test, y_test, verbose=True)
     
-    # Bridge for continuous predictions
+    # For prediction, we need to bridge training and test data
+    # because LSTM needs sequence_length previous values
     bridge_length = sequence_length
     X_bridge = pd.concat([X_train.iloc[-bridge_length:], X_test])
     
     predictions = model.predict(X_bridge)
     y_actual = y_test.values
     
+    # Align predictions with actual (predictions start after sequence_length)
     if len(predictions) > len(y_actual):
         predictions = predictions[-len(y_actual):]
     
+    # Calculate metrics
     rmse = np.sqrt(mean_squared_error(y_actual, predictions))
     mae = mean_absolute_error(y_actual, predictions)
     r2 = r2_score(y_actual, predictions)
@@ -380,11 +468,11 @@ def train_and_evaluate_lstm_weekly(split_data: Dict,
     }
 
 
-def plot_lstm_predictions_weekly(results: Dict, 
-                                 train_y: pd.Series,
-                                 train_dates: pd.DatetimeIndex,
-                                 title: str = None,
-                                 save_path: str = None):
+def plot_lstm_predictions(results: Dict, 
+                          train_y: pd.Series,
+                          train_dates: pd.DatetimeIndex,
+                          title: str = None,
+                          save_path: str = None):
     """Visualize LSTM predictions vs actual for weekly data."""
     fig, ax = plt.subplots(figsize=(14, 6))
     
@@ -430,13 +518,13 @@ if __name__ == "__main__":
     os.makedirs('plots', exist_ok=True)
     print(f"Using device: {device}")
     
-    # Load weekly data
+    # Load data using weekly_trend_counts.csv (interpolated)
     print("\n" + "="*60)
     print("LOADING WEEKLY DATA")
     print("="*60)
     
     data = load_all_weekly_data(
-        sfs_metadata_path='data/SFS_metadata.csv',
+        sfs_path='data/weekly_trend_counts.csv',
         weather_path='data/California_weather.csv',
         google_trends_path='data/google_trends_weekly_smoothed.csv'
     )
@@ -446,19 +534,19 @@ if __name__ == "__main__":
     print("ZARA DRESS - WEEKLY LSTM")
     print("="*60)
     
-    zara_features = prepare_weekly_features(
+    zara_features = prepare_lstm_features(
         data['sfs'], data['weather'], data['google'], 'zara_frequency'
     )
     print(f"\nZara features shape: {zara_features.shape}")
     print(f"Feature columns: {len(zara_features.columns) - 1}")
     
-    zara_split = create_weekly_train_test_split(
+    zara_split = create_train_test_split(
         zara_features, 'zara_frequency', split_at_peak=True
     )
     
-    zara_results = train_and_evaluate_lstm_weekly(
+    zara_results = train_and_evaluate_lstm(
         zara_split,
-        model_name="Zara LSTM (Weekly SFS + Weather + Google)",
+        model_name="Zara LSTM (Weekly)",
         sequence_length=12,
         hidden_size=64,
         num_layers=2,
@@ -466,7 +554,7 @@ if __name__ == "__main__":
         epochs=150
     )
     
-    plot_lstm_predictions_weekly(
+    plot_lstm_predictions(
         zara_results,
         zara_split['y_train'],
         zara_split['train_dates'],
@@ -479,18 +567,18 @@ if __name__ == "__main__":
     print("CHANEL BAG - WEEKLY LSTM")
     print("="*60)
     
-    chanel_features = prepare_weekly_features(
+    chanel_features = prepare_lstm_features(
         data['sfs'], data['weather'], data['google'], 'chanel_frequency'
     )
     print(f"\nChanel features shape: {chanel_features.shape}")
     
-    chanel_split = create_weekly_train_test_split(
+    chanel_split = create_train_test_split(
         chanel_features, 'chanel_frequency', split_at_peak=True
     )
     
-    chanel_results = train_and_evaluate_lstm_weekly(
+    chanel_results = train_and_evaluate_lstm(
         chanel_split,
-        model_name="Chanel LSTM (Weekly SFS + Weather + Google)",
+        model_name="Chanel LSTM (Weekly)",
         sequence_length=12,
         hidden_size=64,
         num_layers=2,
@@ -498,7 +586,7 @@ if __name__ == "__main__":
         epochs=150
     )
     
-    plot_lstm_predictions_weekly(
+    plot_lstm_predictions(
         chanel_results,
         chanel_split['y_train'],
         chanel_split['train_dates'],
@@ -512,13 +600,3 @@ if __name__ == "__main__":
     print("="*60)
     print(f"\nZara:   R² = {zara_results['test_metrics']['r2']:.3f}, RMSE = {zara_results['test_metrics']['rmse']:.2f}")
     print(f"Chanel: R² = {chanel_results['test_metrics']['r2']:.3f}, RMSE = {chanel_results['test_metrics']['rmse']:.2f}")
-    
-    print("\n" + "="*60)
-    print("COMPARISON: WEEKLY vs MONTHLY LSTM")
-    print("="*60)
-    print("\nMonthly LSTM (previous results):")
-    print("  Zara:   R² = -2.331")
-    print("  Chanel: R² = -1.614")
-    print(f"\nWeekly LSTM with Google Trends (current):")
-    print(f"  Zara:   R² = {zara_results['test_metrics']['r2']:.3f}")
-    print(f"  Chanel: R² = {chanel_results['test_metrics']['r2']:.3f}")

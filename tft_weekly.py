@@ -2,7 +2,29 @@
 TFT Model - Weekly Data Version
 
 This module implements Temporal Fusion Transformer for fashion trend prediction
-using WEEKLY data with Google Trends.
+using WEEKLY data from weekly_trend_counts.csv (interpolated columns).
+
+TEMPORAL FUSION TRANSFORMER (TFT) EXPLAINED:
+--------------------------------------------
+
+TFT is a state-of-the-art deep learning architecture for time series that combines:
+1. Variable Selection Networks - learns which features matter
+2. LSTM layers - captures temporal patterns
+3. Multi-head Attention - focuses on important time steps
+4. Gating mechanisms - controls information flow
+
+WHY TFT?
+- Interpretable: Shows which features and time steps matter
+- Handles multiple input types: static, known future, observed
+- State-of-the-art performance on many benchmarks
+- Can quantify prediction uncertainty
+
+ARCHITECTURE FLOW:
+Input -> Variable Selection -> LSTM -> Temporal Attention -> Output
+
+KEY INSIGHT:
+TFT learns WHAT to look at (features) and WHEN to look (time steps),
+making it powerful for complex time series with many potential drivers.
 """
 
 import numpy as np
@@ -21,7 +43,19 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 class VariableSelectionNetwork(nn.Module):
-    """Variable Selection Network - learns which features are important."""
+    """
+    Variable Selection Network - learns which features are important.
+    
+    This is one of TFT's key innovations. Instead of treating all features
+    equally, it learns weights that indicate feature importance.
+    
+    HOW IT WORKS:
+    1. Takes all input features
+    2. Passes through a small network to produce importance weights
+    3. Softmax ensures weights sum to 1
+    4. Multiplies features by their weights
+    5. Transforms to hidden dimension
+    """
     
     def __init__(self, input_size: int, hidden_size: int, dropout: float = 0.1):
         super().__init__()
@@ -36,15 +70,32 @@ class VariableSelectionNetwork(nn.Module):
         self.dropout = nn.Dropout(dropout)
     
     def forward(self, x):
+        # Learn importance weights for each feature
         weights = self.weight_network(x)
+        # Weight the input features
         weighted_x = x * weights
+        # Transform to hidden dimension
         output = self.feature_transform(weighted_x)
         output = self.dropout(output)
         return output, weights
 
 
 class TemporalAttention(nn.Module):
-    """Temporal Self-Attention."""
+    """
+    Temporal Self-Attention - learns which time steps to focus on.
+    
+    WHAT IS ATTENTION?
+    Attention lets the model focus on specific parts of the input.
+    For time series, this means learning which past time steps
+    are most relevant for predicting the future.
+    
+    MULTI-HEAD ATTENTION:
+    Instead of one attention mechanism, we use multiple "heads".
+    Each head can learn different temporal patterns:
+    - One head might focus on recent trends
+    - Another might focus on seasonal patterns
+    - Another might focus on anomalies
+    """
     
     def __init__(self, hidden_size: int, num_heads: int = 4, dropout: float = 0.1):
         super().__init__()
@@ -52,7 +103,7 @@ class TemporalAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
         
-        assert hidden_size % num_heads == 0
+        assert hidden_size % num_heads == 0, "hidden_size must be divisible by num_heads"
         
         self.query = nn.Linear(hidden_size, hidden_size)
         self.key = nn.Linear(hidden_size, hidden_size)
@@ -64,14 +115,17 @@ class TemporalAttention(nn.Module):
     def forward(self, x, mask=None):
         batch_size, seq_len, _ = x.shape
         
+        # Linear projections
         Q = self.query(x)
         K = self.key(x)
         V = self.value(x)
         
+        # Reshape for multi-head attention
         Q = Q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         K = K.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         V = V.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         
+        # Scaled dot-product attention
         scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
         
         if mask is not None:
@@ -80,16 +134,28 @@ class TemporalAttention(nn.Module):
         attention_weights = torch.softmax(scores, dim=-1)
         attention_weights = self.dropout(attention_weights)
         
+        # Apply attention to values
         attended = torch.matmul(attention_weights, V)
         attended = attended.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
         output = self.output(attended)
         
+        # Average attention weights across heads for interpretability
         avg_attention = attention_weights.mean(dim=1)
         return output, avg_attention
 
 
 class SimplifiedTFT(nn.Module):
-    """Simplified Temporal Fusion Transformer."""
+    """
+    Simplified Temporal Fusion Transformer.
+    
+    ARCHITECTURE:
+    1. Variable Selection: Learn which features matter
+    2. LSTM: Capture sequential patterns
+    3. Residual Connection: Help gradient flow
+    4. Temporal Attention: Focus on important time steps
+    5. Residual Connection: More gradient help
+    6. Dense layers: Final prediction
+    """
     
     def __init__(self, input_size: int, hidden_size: int = 64,
                  lstm_layers: int = 1, attention_heads: int = 4,
@@ -107,20 +173,25 @@ class SimplifiedTFT(nn.Module):
         self.fc2 = nn.Linear(32, 1)
         self.relu = nn.ReLU()
         
+        # Store for interpretability
         self.feature_weights = None
         self.attention_weights = None
     
     def forward(self, x):
+        # Variable selection - learn feature importance
         selected, feature_weights = self.var_selection(x)
         self.feature_weights = feature_weights
         
+        # LSTM processing with residual connection
         lstm_out, _ = self.lstm(selected)
         lstm_out = self.layer_norm1(lstm_out + selected)
         
+        # Temporal attention with residual connection
         attended, attention_weights = self.attention(lstm_out)
         self.attention_weights = attention_weights
         attended = self.layer_norm2(attended + lstm_out)
         
+        # Final prediction from last time step
         final = attended[:, -1, :]
         out = self.dropout(final)
         out = self.relu(self.fc1(out))
@@ -130,13 +201,33 @@ class SimplifiedTFT(nn.Module):
 
 
 class TFTForecaster:
-    """TFT wrapper for fashion trend forecasting."""
+    """
+    TFT wrapper for fashion trend forecasting.
+    
+    Handles:
+    - Data scaling
+    - Sequence creation
+    - Training with validation
+    - Prediction
+    - Feature importance extraction
+    """
     
     def __init__(self, sequence_length: int = 12, hidden_size: int = 64,
                  lstm_layers: int = 1, attention_heads: int = 4,
                  dropout: float = 0.2, learning_rate: float = 0.001,
                  epochs: int = 100, batch_size: int = 16):
-        
+        """
+        HYPERPARAMETER EXPLANATIONS:
+        ----------------------------
+        sequence_length: How many past weeks to consider (12 = ~3 months)
+        hidden_size: Model capacity (64 neurons)
+        lstm_layers: LSTM depth (1 layer is often enough)
+        attention_heads: Number of attention perspectives (4)
+        dropout: Regularization (0.2 = drop 20%)
+        learning_rate: Optimization step size (0.001)
+        epochs: Training iterations (100)
+        batch_size: Samples per update (16)
+        """
         self.sequence_length = sequence_length
         self.hidden_size = hidden_size
         self.lstm_layers = lstm_layers
@@ -153,6 +244,7 @@ class TFTForecaster:
         self.feature_names = None
     
     def create_sequences(self, features: np.ndarray, target: np.ndarray):
+        """Create sequences for TFT training."""
         X, y = [], []
         for i in range(len(features) - self.sequence_length):
             X.append(features[i:i + self.sequence_length])
@@ -160,6 +252,7 @@ class TFTForecaster:
         return np.array(X), np.array(y)
     
     def prepare_data(self, X: pd.DataFrame, y: pd.Series, fit_scalers: bool = True):
+        """Prepare data: scale and create sequences."""
         X_array = X.values
         y_array = y.values.reshape(-1, 1)
         
@@ -175,7 +268,7 @@ class TFTForecaster:
     def train(self, X_train: pd.DataFrame, y_train: pd.Series,
               X_val: pd.DataFrame = None, y_val: pd.Series = None,
               verbose: bool = True):
-        
+        """Train the TFT model."""
         self.feature_names = list(X_train.columns)
         X_train_seq, y_train_seq = self.prepare_data(X_train, y_train, fit_scalers=True)
         
@@ -235,6 +328,7 @@ class TFTForecaster:
         return self
     
     def predict(self, X: pd.DataFrame) -> np.ndarray:
+        """Make predictions with trained model."""
         if self.model is None:
             raise ValueError("Model not trained.")
         
@@ -251,6 +345,12 @@ class TFTForecaster:
         return self.target_scaler.inverse_transform(predictions_scaled.reshape(-1, 1)).flatten()
     
     def get_feature_importance(self, X: pd.DataFrame) -> pd.DataFrame:
+        """
+        Get learned feature importance from Variable Selection Network.
+        
+        This is a key advantage of TFT - it tells you which features
+        the model considers most important for prediction.
+        """
         if self.model is None:
             raise ValueError("Model not trained.")
         
@@ -264,6 +364,7 @@ class TFTForecaster:
             _ = self.model(X_tensor)
             weights = self.model.feature_weights.cpu().numpy()
         
+        # Average weights across batches and time steps
         avg_weights = weights.mean(axis=(0, 1))
         
         return pd.DataFrame({
@@ -273,6 +374,7 @@ class TFTForecaster:
     
     def plot_feature_importance(self, X: pd.DataFrame, top_n: int = 15,
                                 title: str = None, save_path: str = None):
+        """Visualize feature importance."""
         importance_df = self.get_feature_importance(X)
         top_features = importance_df.head(top_n)
         
@@ -288,21 +390,149 @@ class TFTForecaster:
         plt.tight_layout()
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"Saved: {save_path}")
         plt.show()
         
         return importance_df
 
 
-# Import feature preparation from lstm_weekly
-from lstm_weekly import prepare_weekly_features, create_weekly_train_test_split
+def prepare_tft_features(sfs_df: pd.DataFrame, 
+                         weather_df: pd.DataFrame,
+                         google_df: pd.DataFrame,
+                         target_col: str) -> pd.DataFrame:
+    """
+    Prepare features for weekly TFT model.
+    
+    Uses the same feature engineering as LSTM for fair comparison.
+    
+    Parameters:
+    -----------
+    sfs_df : DataFrame
+        Weekly SFS data with trend frequencies (from weekly_trend_counts.csv)
+    weather_df : DataFrame
+        Weekly weather data
+    google_df : DataFrame
+        Weekly Google Trends data
+    target_col : str
+        Target column name ('zara_frequency' or 'chanel_frequency')
+    
+    Returns:
+    --------
+    DataFrame with features and target aligned
+    """
+    df = pd.DataFrame(index=sfs_df.index)
+    df[target_col] = sfs_df[target_col]
+    
+    # === LAG FEATURES ===
+    lag_weeks = [1, 2, 4, 8, 12, 26, 52]
+    for lag in lag_weeks:
+        df[f'lag_{lag}w'] = df[target_col].shift(lag)
+    
+    # === ROLLING STATISTICS ===
+    windows = [4, 12, 26]
+    for window in windows:
+        df[f'rolling_mean_{window}w'] = df[target_col].shift(1).rolling(window, min_periods=1).mean()
+        df[f'rolling_std_{window}w'] = df[target_col].shift(1).rolling(window, min_periods=1).std()
+        df[f'rolling_min_{window}w'] = df[target_col].shift(1).rolling(window, min_periods=1).min()
+        df[f'rolling_max_{window}w'] = df[target_col].shift(1).rolling(window, min_periods=1).max()
+    
+    # === MOMENTUM FEATURES ===
+    df['momentum_1w'] = df[target_col].diff(1)
+    df['momentum_4w'] = df[target_col].diff(4)
+    df['momentum_12w'] = df[target_col].diff(12)
+    
+    for period in [1, 4, 12]:
+        pct_change = df[target_col].pct_change(period)
+        pct_change = pct_change.replace([np.inf, -np.inf], np.nan)
+        df[f'pct_change_{period}w'] = pct_change
+    
+    # === GOOGLE TRENDS FEATURES ===
+    if google_df is not None:
+        google_aligned = google_df.reindex(df.index, method='nearest').ffill().bfill()
+        
+        if 'zara' in target_col.lower():
+            trend_col = 'zara_search_interest'
+        else:
+            trend_col = 'chanel_search_interest'
+        
+        if trend_col in google_aligned.columns:
+            df['search_interest'] = google_aligned[trend_col]
+            df['search_interest_lag_1w'] = df['search_interest'].shift(1)
+            df['search_interest_lag_4w'] = df['search_interest'].shift(4)
+            df['search_interest_rolling_4w'] = df['search_interest'].rolling(4, min_periods=1).mean()
+            df['search_interest_momentum'] = df['search_interest'].diff(1)
+    
+    # === WEATHER FEATURES ===
+    if weather_df is not None:
+        weather_aligned = weather_df.reindex(df.index, method='nearest').ffill().bfill()
+        
+        for col in weather_aligned.columns:
+            df[col] = weather_aligned[col]
+            df[f'{col}_lag_1w'] = weather_aligned[col].shift(1)
+            df[f'{col}_lag_4w'] = weather_aligned[col].shift(4)
+    
+    # === CALENDAR FEATURES ===
+    df['week_of_year'] = df.index.isocalendar().week.astype(int)
+    df['month'] = df.index.month
+    df['quarter'] = df.index.quarter
+    df['year'] = df.index.year
+    df['week_sin'] = np.sin(2 * np.pi * df['week_of_year'] / 52)
+    df['week_cos'] = np.cos(2 * np.pi * df['week_of_year'] / 52)
+    
+    # === CLEAN UP ===
+    df = df.ffill().bfill()
+    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.fillna(0)
+    
+    return df
 
 
-def train_and_evaluate_tft_weekly(split_data: Dict,
-                                  model_name: str = "TFT",
-                                  sequence_length: int = 12,
-                                  hidden_size: int = 64,
-                                  attention_heads: int = 4,
-                                  epochs: int = 100) -> Dict:
+def create_train_test_split(features_df: pd.DataFrame,
+                            target_col: str,
+                            split_at_peak: bool = True,
+                            train_fraction: float = 0.75) -> Dict:
+    """Create train/test split for weekly data."""
+    if split_at_peak:
+        peak_idx = features_df[target_col].idxmax()
+        peak_loc = features_df.index.get_loc(peak_idx)
+        
+        print(f"Peak found at: {peak_idx.strftime('%Y-%m-%d')}")
+        print(f"Peak value: {features_df[target_col].max():.2f}")
+        
+        train_df = features_df.iloc[:peak_loc + 1]
+        test_df = features_df.iloc[peak_loc + 1:]
+    else:
+        split_point = int(len(features_df) * train_fraction)
+        train_df = features_df.iloc[:split_point]
+        test_df = features_df.iloc[split_point:]
+    
+    feature_cols = [c for c in features_df.columns if c != target_col]
+    
+    X_train = train_df[feature_cols]
+    y_train = train_df[target_col]
+    X_test = test_df[feature_cols]
+    y_test = test_df[target_col]
+    
+    print(f"Training samples: {len(X_train)}")
+    print(f"Test samples: {len(X_test)}")
+    
+    return {
+        'X_train': X_train,
+        'y_train': y_train,
+        'X_test': X_test,
+        'y_test': y_test,
+        'train_dates': train_df.index,
+        'test_dates': test_df.index,
+        'peak_date': peak_idx if split_at_peak else None
+    }
+
+
+def train_and_evaluate_tft(split_data: Dict,
+                           model_name: str = "TFT",
+                           sequence_length: int = 12,
+                           hidden_size: int = 64,
+                           attention_heads: int = 4,
+                           epochs: int = 100) -> Dict:
     """Complete TFT training and evaluation."""
     print(f"\n{'='*60}")
     print(f"TRAINING {model_name.upper()}")
@@ -317,6 +547,7 @@ def train_and_evaluate_tft_weekly(split_data: Dict,
     print(f"Test samples: {len(X_test)}")
     print(f"Features: {len(X_train.columns)}")
     print(f"Sequence length: {sequence_length} weeks")
+    print(f"Device: {device}")
     
     model = TFTForecaster(
         sequence_length=sequence_length,
@@ -342,6 +573,7 @@ def train_and_evaluate_tft_weekly(split_data: Dict,
     if len(predictions) > len(y_actual):
         predictions = predictions[-len(y_actual):]
     
+    # Calculate metrics
     rmse = np.sqrt(mean_squared_error(y_actual, predictions))
     mae = mean_absolute_error(y_actual, predictions)
     r2 = r2_score(y_actual, predictions)
@@ -366,11 +598,11 @@ def train_and_evaluate_tft_weekly(split_data: Dict,
     }
 
 
-def plot_tft_predictions_weekly(results: Dict, 
-                                train_y: pd.Series,
-                                train_dates: pd.DatetimeIndex,
-                                title: str = None,
-                                save_path: str = None):
+def plot_tft_predictions(results: Dict, 
+                         train_y: pd.Series,
+                         train_dates: pd.DatetimeIndex,
+                         title: str = None,
+                         save_path: str = None):
     """Visualize TFT predictions."""
     fig, ax = plt.subplots(figsize=(14, 6))
     
@@ -378,7 +610,7 @@ def plot_tft_predictions_weekly(results: Dict,
     ax.plot(results['test_dates'], results['actual'], color='#457B9D', linewidth=1.5, label='Test (Actual)')
     ax.plot(results['test_dates'], results['predictions'], color='#E63946', linewidth=1.5, 
             linestyle='--', label='Test (Predicted)', alpha=0.8)
-    ax.axvline(x=train_dates[-1], color='black', linestyle='--', alpha=0.5)
+    ax.axvline(x=train_dates[-1], color='black', linestyle='--', alpha=0.5, label='Train/Test Split')
     
     if title:
         ax.set_title(title, fontsize=14, fontweight='bold')
@@ -409,28 +641,47 @@ if __name__ == "__main__":
     os.makedirs('plots', exist_ok=True)
     print(f"Using device: {device}")
     
-    # Load data
+    # Load data using weekly_trend_counts.csv (interpolated)
+    print("\n" + "="*60)
+    print("LOADING WEEKLY DATA")
+    print("="*60)
+    
     data = load_all_weekly_data(
-        sfs_metadata_path='data/SFS_metadata.csv',
+        sfs_path='data/weekly_trend_counts.csv',
         weather_path='data/California_weather.csv',
         google_trends_path='data/google_trends_weekly_smoothed.csv'
     )
     
-    # === ZARA ===
+    # === ZARA DRESS ===
     print("\n" + "="*60)
     print("ZARA DRESS - WEEKLY TFT")
     print("="*60)
     
-    zara_features = prepare_weekly_features(data['sfs'], data['weather'], data['google'], 'zara_frequency')
-    zara_split = create_weekly_train_test_split(zara_features, 'zara_frequency')
+    zara_features = prepare_tft_features(
+        data['sfs'], data['weather'], data['google'], 'zara_frequency'
+    )
+    print(f"\nZara features shape: {zara_features.shape}")
+    print(f"Feature columns: {len(zara_features.columns) - 1}")
     
-    zara_results = train_and_evaluate_tft_weekly(
-        zara_split, model_name="Zara TFT (Weekly)", sequence_length=12, epochs=150
+    zara_split = create_train_test_split(
+        zara_features, 'zara_frequency', split_at_peak=True
     )
     
-    plot_tft_predictions_weekly(
-        zara_results, zara_split['y_train'], zara_split['train_dates'],
-        title='Zara Dress: Weekly TFT Predictions', save_path='plots/zara_tft_weeklyV2.png'
+    zara_results = train_and_evaluate_tft(
+        zara_split,
+        model_name="Zara TFT (Weekly)",
+        sequence_length=12,
+        hidden_size=64,
+        attention_heads=4,
+        epochs=150
+    )
+    
+    plot_tft_predictions(
+        zara_results,
+        zara_split['y_train'],
+        zara_split['train_dates'],
+        title='Zara Dress: Weekly TFT Predictions vs Actual',
+        save_path='plots/zara_tft_weekly_predictions.png'
     )
     
     # Feature importance
@@ -440,24 +691,39 @@ if __name__ == "__main__":
     
     zara_results['model'].plot_feature_importance(
         zara_results['X_test'], top_n=15,
-        title='Zara: TFT Feature Importance', save_path='plots/zara_tft_importance.png'
+        title='Zara Dress: TFT Feature Importance',
+        save_path='plots/zara_tft_weekly_importance.png'
     )
     
-    # === CHANEL ===
+    # === CHANEL BAG ===
     print("\n" + "="*60)
     print("CHANEL BAG - WEEKLY TFT")
     print("="*60)
     
-    chanel_features = prepare_weekly_features(data['sfs'], data['weather'], data['google'], 'chanel_frequency')
-    chanel_split = create_weekly_train_test_split(chanel_features, 'chanel_frequency')
+    chanel_features = prepare_tft_features(
+        data['sfs'], data['weather'], data['google'], 'chanel_frequency'
+    )
+    print(f"\nChanel features shape: {chanel_features.shape}")
     
-    chanel_results = train_and_evaluate_tft_weekly(
-        chanel_split, model_name="Chanel TFT (Weekly)", sequence_length=12, epochs=150
+    chanel_split = create_train_test_split(
+        chanel_features, 'chanel_frequency', split_at_peak=True
     )
     
-    plot_tft_predictions_weekly(
-        chanel_results, chanel_split['y_train'], chanel_split['train_dates'],
-        title='Chanel Bag: Weekly TFT Predictions', save_path='plots/chanel_tft_weeklyV2.png'
+    chanel_results = train_and_evaluate_tft(
+        chanel_split,
+        model_name="Chanel TFT (Weekly)",
+        sequence_length=12,
+        hidden_size=64,
+        attention_heads=4,
+        epochs=150
+    )
+    
+    plot_tft_predictions(
+        chanel_results,
+        chanel_split['y_train'],
+        chanel_split['train_dates'],
+        title='Chanel Bag: Weekly TFT Predictions vs Actual',
+        save_path='plots/chanel_tft_weekly_predictions.png'
     )
     
     # === SUMMARY ===
