@@ -11,6 +11,7 @@ ENV/
 *.xls
 data/
 datasets/
+data/f1_fashion/
 
 # Python
 __pycache__/
