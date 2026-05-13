@@ -1,389 +1,385 @@
 """
-Train/Test Split for Time Series
+Train / Validation / Test Split — Heuritech F1 Fashion Dataset
 
-This module handles the crucial task of splitting time series data
-for training and testing while avoiding data leakage.
+Split strategy: strict temporal ordering
+  Train : first 70 % of timesteps  (indices [0,       train_end)  )
+  Val   : next  15 % of timesteps  (indices [train_end, val_end)  )
+  Test  : final 15 % of timesteps  (indices [val_end,   T)        )
 
-Key Concepts Explained:
------------------------
-TIME SERIES SPLITTING is different from regular ML train/test splits!
+The same index boundaries are applied to every one of the 10 000 series.
 
-WRONG WAY (Random Split):
-    Randomly shuffle and split data.
-    Problem: Model might train on December data and test on January!
-    This is DATA LEAKAGE - using future information to predict the past.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WHY RANDOM SPLITS CAUSE DATA LEAKAGE IN TIME SERIES FORECASTING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-RIGHT WAY (Temporal Split):
-    Split chronologically - train on past, test on future.
-    This simulates real-world forecasting conditions.
+A random split treats each observation as i.i.d. — independent and
+identically distributed — and shuffles them before partitioning.
+This assumption breaks down completely for time series for four reasons:
 
-MY RESEARCH DESIGN:
-    Train: Introduction + Growth phases (before peak)
-    Test: Saturation + Decline phases (after split point)
-    
-    This tests if models can predict the decline after only seeing growth.
+1. TEMPORAL AUTOCORRELATION
+   Fashion time series are strongly autocorrelated: value at week t is
+   correlated with values at weeks t-1, t-2, …  A random split can put
+   week t in training and week t+1 in test, so the model has already
+   "seen" the neighbourhood of every test observation during training.
+   The reported test error will be far lower than any real deployment
+   error — a classic optimistic-bias / data-leakage scenario.
+
+2. LOOK-AHEAD BIAS IN LAGGED FEATURES
+   Models for time series forecasting typically use lagged features
+   (x_{t-1}, x_{t-2}, …) or rolling statistics.  If t is in the test
+   set but t+1 is in training, computing x_{t+1}'s lag-1 feature
+   requires x_t — a test observation — at training time.  The model
+   implicitly learns the test set distribution during training.
+
+3. NORMALISATION / SCALING LEAKAGE
+   When scaling parameters (mean, standard deviation, min/max) are
+   computed over a randomly-mixed training set, future observations
+   contribute to those statistics.  Any subsequent normalisation of
+   the test set therefore encodes information that would be unavailable
+   at real deployment time.
+
+4. SEASONAL / TREND LEAKAGE
+   The F1 dataset spans 2015–2019 and shows annual seasonality
+   (period = 52 weeks).  A random split scatters every season across
+   both train and test, so the model is effectively trained on the full
+   seasonal cycle before evaluation.  A temporal split forces the model
+   to generalise to a future season it has never seen — the correct
+   evaluation protocol for fashion trend forecasting.
+
+The only correct protocol is: train strictly on the past, evaluate
+strictly on the future.  Our 70 / 15 / 15 temporal split enforces this:
+
+  ┌────────────────────────────────────────────────────────────────┐
+  │  TRAIN (70 %)  │  VAL (15 %)  │  TEST (15 %)                  │
+  │  fit models    │  tune HPs    │  final evaluation              │
+  │  2015-01-05    │  2018-07-02  │  2019-04-14                   │
+  │       →        │      →       │      →  2019-12-30            │
+  └────────────────────────────────────────────────────────────────┘
+
+References:
+  • Hyndman & Athanasopoulos, "Forecasting: Principles and Practice",
+    §3.4 Evaluating forecast accuracy — time-series cross-validation.
+  • Bergmeir & Benítez (2012), "On the use of cross-validation for
+    time series predictor evaluation", Information Sciences 191.
+  • David et al. (2022), "HERMES: Hybrid Error-corrector Model with
+    inclusion of External Signal for non-stationary time series",
+    ICASSP 2022.  (The F1 dataset paper; uses 3-year train / 1-year
+    test — a strict temporal holdout.)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
-import pandas as pd
+import json
+import os
+from datetime import datetime, timezone
+from typing import Tuple
+
 import numpy as np
-import matplotlib.pyplot as plt
-from typing import Dict, Tuple, List
-import warnings
-warnings.filterwarnings('ignore')
+import pandas as pd
+
+# ── Paths & ratios ─────────────────────────────────────────────────────────
+PARQUET     = "data/f1_fashion/f1_cleaned.parquet"
+SPLITS_JSON = "data/f1_fashion/splits.json"
+
+TRAIN_RATIO = 0.70
+VAL_RATIO   = 0.15
+TEST_RATIO  = 0.15      # = 1 - TRAIN_RATIO - VAL_RATIO
+
+# module-level cache so get_split() avoids repeated I/O
+_df_wide: pd.DataFrame | None = None
 
 
-def find_peak_date(df: pd.DataFrame, target_column: str) -> pd.Timestamp:
+# ── Internal helpers ───────────────────────────────────────────────────────
+
+def _load_wide(parquet_path: str = PARQUET) -> pd.DataFrame:
     """
-    Find the date when a trend reaches its peak value.
-    
-    PEAK DETECTION:
-    The peak is simply the maximum value in the time series.
-    This represents the saturation point - after this, the trend declines.
-    
-    Parameters:
-    -----------
-    df : DataFrame
-        Data with datetime index
-    target_column : str
-        Column name of the target variable
-    
-    Returns:
-    --------
-    Timestamp of the peak date
+    Load f1_cleaned.parquet, pivot to wide format (dates × series_id),
+    and cache the result at module level.
+    Only the 'main' signal is used for model training/evaluation.
     """
-    peak_date = df[target_column].idxmax()
-    peak_value = df[target_column].max()
-    
-    print(f"Peak found: {peak_date.strftime('%Y-%m')} with value {peak_value}")
-    
-    return peak_date
+    global _df_wide
+    if _df_wide is None:
+        df_long = pd.read_parquet(parquet_path)
+        main = df_long[df_long["signal"] == "main"]
+        wide = main.pivot(index="date", columns="series_id", values="value")
+        wide.index = pd.to_datetime(wide.index)
+        _df_wide = wide.sort_index()
+    return _df_wide
 
 
-def calculate_split_at_peak(df: pd.DataFrame, target_column: str) -> pd.Timestamp:
+def _split_indices(T: int) -> Tuple[int, int]:
     """
-    Split exactly at the peak - train on growth phase, test on decline.
-    
-    This approach answers: "Given we've just hit the peak, 
-    what will the decline look like?"
+    Compute (train_end, val_end) integer indices for T total timesteps.
+
+    Indices are computed with integer truncation so that:
+      train : [0, train_end)
+      val   : [train_end, val_end)
+      test  : [val_end, T)
+
+    Remainder timesteps (due to truncation) fall into the test set,
+    meaning the test set is never shorter than intended.
     """
-    peak_date = df[target_column].idxmax()
-    peak_value = df[target_column].max()
-    
-    total_months = len(df)
-    peak_position = df.index.get_loc(peak_date)
-    
-    print(f"Peak found: {peak_date.strftime('%Y-%m')} with value {peak_value}")
-    print(f"  Training: months 1-{peak_position + 1} (growth + peak)")
-    print(f"  Testing: months {peak_position + 2}-{total_months} (decline)")
-    
-    return peak_date
+    train_end = int(T * TRAIN_RATIO)
+    val_end   = int(T * (TRAIN_RATIO + VAL_RATIO))
+    return train_end, val_end
 
 
-def create_train_test_split(df: pd.DataFrame,
-                           target_column: str,
-                           split_date: pd.Timestamp) -> Dict:
-    """
-    Split data into training and testing sets.
-    
-    WHAT THIS FUNCTION DOES:
-    ------------------------
-    1. Splits data at the specified date
-    2. Separates features (X) from target (y)
-    3. Removes rows with NaN values (from lagged features)
-    4. Returns organized dictionary for model training
-    
-    HANDLING NaN VALUES:
-    Lagged features create NaN at the start of the data:
-    - lag_1 has NaN for first row
-    - lag_12 has NaN for first 12 rows
-    
-    We drop these rows since they have incomplete information.
-    This is safe because we have enough data.
-    
-    Parameters:
-    -----------
-    df : DataFrame
-        Feature-engineered data
-    target_column : str
-        Target variable name
-    split_date : Timestamp
-        Date to split on
-    
-    Returns:
-    --------
-    Dictionary with X_train, y_train, X_test, y_test, etc.
-    """
-    train_df = df[df.index <= split_date].copy()
-    test_df = df[df.index > split_date].copy()
-    
-    feature_columns = [col for col in df.columns if col != target_column]
-    
-    train_df_clean = train_df.dropna()
-    test_df_clean = test_df.dropna()
-    
-    X_train = train_df_clean[feature_columns]
-    y_train = train_df_clean[target_column]
-    X_test = test_df_clean[feature_columns]
-    y_test = test_df_clean[target_column]
+# ── Public API ─────────────────────────────────────────────────────────────
 
-    result = {
-        'X_train': X_train,
-        'y_train': y_train,
-        'X_test': X_test,
-        'y_test': y_test,
-        'feature_names': feature_columns,
-        'target_name': target_column,
-        'train_dates': train_df_clean.index,
-        'test_dates': test_df_clean.index,
-        'split_date': split_date,
-        'train_size': len(train_df_clean),
-        'test_size': len(test_df_clean),
-        'n_features': len(feature_columns),
-        'train_df': train_df_clean,
-        'test_df': test_df_clean
+def compute_and_save_splits(
+    parquet_path: str = PARQUET,
+    splits_path:  str = SPLITS_JSON,
+) -> dict:
+    """
+    Compute split boundaries, print date ranges, and write splits.json.
+
+    The split is defined entirely by two integer indices (train_end,
+    val_end) that are identical for every series — guaranteeing that
+    no series leaks future information into an earlier split.
+
+    Returns the metadata dict that was written to disk.
+    """
+    df_wide = _load_wide(parquet_path)
+
+    T          = len(df_wide)
+    dates      = df_wide.index
+    series_ids = df_wide.columns.tolist()
+
+    train_end, val_end = _split_indices(T)
+
+    train_n = train_end
+    val_n   = val_end - train_end
+    test_n  = T - val_end
+
+    train_dates = dates[:train_end]
+    val_dates   = dates[train_end:val_end]
+    test_dates  = dates[val_end:]
+
+    # ── Console output ───────────────────────────────────────────────────
+    print("=" * 65)
+    print("TEMPORAL TRAIN / VALIDATION / TEST SPLIT — F1 Fashion Dataset")
+    print("=" * 65)
+
+    print(f"\n  Total timesteps : {T:>6}  ({dates[0].date()} → {dates[-1].date()})")
+    print(f"  Total series    : {len(series_ids):>6}")
+    print()
+
+    _print_split_block("TRAIN", train_n, T, train_dates[0], train_dates[-1],
+                       0, train_end - 1, TRAIN_RATIO)
+    _print_split_block("VAL  ", val_n,   T, val_dates[0],   val_dates[-1],
+                       train_end, val_end - 1, VAL_RATIO)
+    _print_split_block("TEST ", test_n,  T, test_dates[0],  test_dates[-1],
+                       val_end, T - 1, TEST_RATIO)
+
+    print()
+    print("  Split indices (0-based, half-open intervals):")
+    print(f"    train : [0, {train_end})")
+    print(f"    val   : [{train_end}, {val_end})")
+    print(f"    test  : [{val_end}, {T})")
+
+    # ── Build metadata ───────────────────────────────────────────────────
+    meta = {
+        "split_ratios": {
+            "train": TRAIN_RATIO,
+            "val":   VAL_RATIO,
+            "test":  TEST_RATIO,
+        },
+        "total_timesteps": T,
+        "series_count":    len(series_ids),
+        "indices": {
+            "train_start": 0,
+            "train_end":   train_end,       # exclusive upper bound
+            "val_start":   train_end,
+            "val_end":     val_end,         # exclusive upper bound
+            "test_start":  val_end,
+            "test_end":    T,               # exclusive upper bound
+        },
+        "timestep_counts": {
+            "train": train_n,
+            "val":   val_n,
+            "test":  test_n,
+        },
+        "date_ranges": {
+            "train": {
+                "start": str(train_dates[0].date()),
+                "end":   str(train_dates[-1].date()),
+            },
+            "val": {
+                "start": str(val_dates[0].date()),
+                "end":   str(val_dates[-1].date()),
+            },
+            "test": {
+                "start": str(test_dates[0].date()),
+                "end":   str(test_dates[-1].date()),
+            },
+        },
+        "all_dates": [str(d.date()) for d in dates],
+        "series_ids": series_ids,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "note": (
+            "Strict temporal split: train on past, validate on present, "
+            "test on future.  All indices are 0-based half-open intervals. "
+            "Apply identically across all series — never shuffle time."
+        ),
     }
-    
-    return result
+
+    os.makedirs(os.path.dirname(splits_path), exist_ok=True)
+    with open(splits_path, "w") as fh:
+        json.dump(meta, fh, indent=2)
+
+    size_kb = os.path.getsize(splits_path) / 1024
+    print(f"\n  Saved → {splits_path}  ({size_kb:.0f} KB)")
+
+    return meta
 
 
-def visualize_split(sfs_df: pd.DataFrame,
-                   target_column: str,
-                   split_date: pd.Timestamp,
-                   peak_date: pd.Timestamp,
-                   title: str = None,
-                   save_path: str = None):
+def get_split(
+    series_id: str,
+    parquet_path: str = PARQUET,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Visualize the train/test split on the trend lifecycle.
-    
-    This creates a clear visualization showing:
-    - Training data in one color
-    - Test data in another color
-    - Vertical lines for split point and peak
-    
-    Parameters:
-    -----------
-    sfs_df : DataFrame
-        Original SFS data
-    target_column : str
-        Target variable
-    split_date : Timestamp
-        Where data is split
-    peak_date : Timestamp
-        Where the peak occurs
-    title : str, optional
-        Plot title
-    save_path : str, optional
-        Path to save figure
+    Return (train, val, test) value arrays for a single series.
+
+    Parameters
+    ----------
+    series_id   : column name in the wide matrix, e.g. 'us_female_outerwear_0'
+    parquet_path: path to f1_cleaned.parquet (uses module cache after first call)
+
+    Returns
+    -------
+    train : np.ndarray shape (train_n,)   — first 70 % of timesteps
+    val   : np.ndarray shape (val_n,)     — next  15 % of timesteps
+    test  : np.ndarray shape (test_n,)    — final 15 % of timesteps
+
+    Example
+    -------
+    >>> train, val, test = get_split("us_female_outerwear_0")
+    >>> print(train.shape, val.shape, test.shape)
+    (182,) (39,) (40,)
     """
-    fig, ax = plt.subplots(figsize=(14, 6))
-   
-    train_mask = sfs_df.index <= split_date
-    test_mask = sfs_df.index > split_date
+    df_wide = _load_wide(parquet_path)
 
-    ax.plot(sfs_df.index[train_mask], sfs_df.loc[train_mask, target_column],
-            color='#2A9D8F', linewidth=2, label='Training Data (Growth Phase)')
-    ax.fill_between(sfs_df.index[train_mask], sfs_df.loc[train_mask, target_column],
-                    alpha=0.3, color='#2A9D8F')
- 
-    ax.plot(sfs_df.index[test_mask], sfs_df.loc[test_mask, target_column],
-            color='#E63946', linewidth=2, label='Test Data (Saturation/Decline)')
-    ax.fill_between(sfs_df.index[test_mask], sfs_df.loc[test_mask, target_column],
-                    alpha=0.3, color='#E63946')
+    if series_id not in df_wide.columns:
+        available = df_wide.columns[:5].tolist()
+        raise KeyError(
+            f"'{series_id}' not in dataset.  "
+            f"Example valid IDs: {available}"
+        )
 
-    ax.axvline(x=split_date, color='black', linestyle='--', linewidth=2,
-               label=f'Split Point: {split_date.strftime("%Y-%m")}')
+    T = len(df_wide)
+    train_end, val_end = _split_indices(T)
 
-    ax.axvline(x=peak_date, color='gold', linestyle=':', linewidth=2,
-               label=f'Peak: {peak_date.strftime("%Y-%m")}')
-
-    if title:
-        ax.set_title(title, fontsize=14, fontweight='bold')
-    ax.set_xlabel('Date')
-    ax.set_ylabel('Frequency')
-    ax.legend(loc='upper right')
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Saved: {save_path}")
-    
-    plt.show()
+    values = df_wide[series_id].to_numpy(dtype=float)
+    return values[:train_end], values[train_end:val_end], values[val_end:]
 
 
-def prepare_all_splits(feature_datasets: Dict,
-                       sfs_df: pd.DataFrame,
-                       train_fraction: float = 0.75,
-                       visualize: bool = True,
-                       save_plots: bool = False) -> Dict:
+def get_split_dates(parquet_path: str = PARQUET) -> dict:
     """
-    Prepare train/test splits for all model configurations.
-    
-    This creates splits for:
-    - Zara: XGBoost, LSTM, TFT
-    - Chanel: XGBoost, LSTM, TFT
-    
-    Each split uses the same split date within a trend (for fair comparison)
-    but different trends may have different split dates (different peaks).
-    
-    Parameters:
-    -----------
-    feature_datasets : dict
-        Dictionary of feature DataFrames from Stage 3
-    sfs_df : DataFrame
-        Original SFS data for visualization
-    train_fraction : float
-        Fraction of pre-peak data for training
-    visualize : bool
-        Whether to show visualizations
-    save_plots : bool
-        Whether to save plot files
-    
-    Returns:
-    --------
-    Dictionary containing all train/test splits
+    Return the exact pd.DatetimeIndex for each split as a dict.
+
+    Useful when building date-aware tensors for sequence models.
     """
-    print("=" * 60)
-    print("PREPARING TRAIN/TEST SPLITS")
-    print("=" * 60)
-    
-    splits = {}
-    
-    # === ZARA DRESS ===
-    print("\n" + "-" * 40)
-    print("ZARA DRESS")
-    print("-" * 40)
-    
-    zara_split_date = calculate_split_at_peak(sfs_df, 'zara_frequency')
+    df_wide = _load_wide(parquet_path)
+    T = len(df_wide)
+    train_end, val_end = _split_indices(T)
+    dates = df_wide.index
+    return {
+        "train": dates[:train_end],
+        "val":   dates[train_end:val_end],
+        "test":  dates[val_end:],
+    }
 
-    zara_peak_date = find_peak_date(sfs_df, 'zara_frequency')
-  
-    for model in ['xgb', 'lstm', 'tft']:
-        key = f'zara_{model}'
-        print(f"\n  Preparing {model.upper()} split...")
-        
-        splits[key] = create_train_test_split(
-            feature_datasets[key],
-            'zara_frequency',
-            zara_split_date
-        )
-        
-        print(f"    Train: {splits[key]['train_size']} samples")
-        print(f"    Test: {splits[key]['test_size']} samples")
-        print(f"    Features: {splits[key]['n_features']}")
-    
-    if visualize:
-        visualize_split(
-            sfs_df, 'zara_frequency', zara_split_date, zara_peak_date,
-            title='Zara Dress: Train/Test Split',
-            save_path='plots/zara_split.png' if save_plots else None
-        )
-    
-    # === CHANEL BAG ===
-    print("\n" + "-" * 40)
-    print("CHANEL BAG")
-    print("-" * 40)
- 
-    chanel_split_date = calculate_split_at_peak(sfs_df, 'chanel_frequency')
-    
-    chanel_peak_date = find_peak_date(sfs_df, 'chanel_frequency')
 
-    for model in ['xgb', 'lstm', 'tft']:
-        key = f'chanel_{model}'
-        print(f"\n  Preparing {model.upper()} split...")
-        
-        splits[key] = create_train_test_split(
-            feature_datasets[key],
-            'chanel_frequency',
-            chanel_split_date
-        )
-        
-        print(f"    Train: {splits[key]['train_size']} samples")
-        print(f"    Test: {splits[key]['test_size']} samples")
-        print(f"    Features: {splits[key]['n_features']}")
-  
-    if visualize:
-        visualize_split(
-            sfs_df, 'chanel_frequency', chanel_split_date, chanel_peak_date,
-            title='Chanel Bag: Train/Test Split',
-            save_path='plots/chanel_split.png' if save_plots else None
-        )
-    
-    splits['zara_split_date'] = zara_split_date
-    splits['zara_peak_date'] = zara_peak_date
-    splits['chanel_split_date'] = chanel_split_date
-    splits['chanel_peak_date'] = chanel_peak_date
+def get_all_splits(parquet_path: str = PARQUET) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Return (train_df, val_df, test_df) wide DataFrames for all series at once.
 
-    print("\n" + "=" * 60)
+    Shape of each: (split_timesteps, 10 000).
+    Preferable when vectorising operations over the full dataset.
+    """
+    df_wide = _load_wide(parquet_path)
+    T = len(df_wide)
+    train_end, val_end = _split_indices(T)
+    return df_wide.iloc[:train_end], df_wide.iloc[train_end:val_end], df_wide.iloc[val_end:]
+
+
+# ── Formatting helper ──────────────────────────────────────────────────────
+
+def _print_split_block(name, n, T, start, end, idx_start, idx_end, ratio):
+    pct = 100 * n / T
+    print(
+        f"  {name}  {start.date()}  →  {end.date()}"
+        f"  |  {n:>3} weeks  ({pct:.1f} %)  "
+        f"  indices [{idx_start}, {idx_end}]"
+    )
+
+
+# ── Summary table ──────────────────────────────────────────────────────────
+
+def print_split_summary(parquet_path: str = PARQUET) -> None:
+    """Print a compact summary of the split sizes for all 10 000 series."""
+    df_wide = _load_wide(parquet_path)
+    T = len(df_wide)
+    train_end, val_end = _split_indices(T)
+
+    train_n = train_end
+    val_n   = val_end - train_end
+    test_n  = T - val_end
+
+    print("\n" + "=" * 55)
     print("SPLIT SUMMARY")
-    print("=" * 60)
-    
-    print("\nZara Dress:")
-    print(f"  Split date: {zara_split_date.strftime('%Y-%m')}")
-    print(f"  Peak date: {zara_peak_date.strftime('%Y-%m')}")
-    print(f"  Test includes: {(zara_peak_date - zara_split_date).days // 30} months before peak")
-    
-    print("\nChanel Bag:")
-    print(f"  Split date: {chanel_split_date.strftime('%Y-%m')}")
-    print(f"  Peak date: {chanel_peak_date.strftime('%Y-%m')}")
-    print(f"  Test includes: {(chanel_peak_date - chanel_split_date).days // 30} months before peak")
-    
-    return splits
+    print("=" * 55)
+    print(f"  {'Split':<8} {'Weeks':>6}  {'Pct':>6}  {'Start':>12}  {'End':>12}")
+    print("-" * 55)
+    dates = df_wide.index
+    for label, n, s, e in [
+        ("train", train_n, dates[0],          dates[train_end - 1]),
+        ("val",   val_n,   dates[train_end],   dates[val_end   - 1]),
+        ("test",  test_n,  dates[val_end],     dates[-1]),
+    ]:
+        print(
+            f"  {label:<8} {n:>6}  {100*n/T:>5.1f}%"
+            f"  {str(s.date()):>12}  {str(e.date()):>12}"
+        )
+    print("=" * 55)
+    print(f"  {'TOTAL':<8} {T:>6}  100.0%")
+    print(f"\n  Applied identically across all {len(df_wide.columns):,} series.")
+    print("=" * 55)
 
 
-def print_split_info(split_data: Dict):
-    """
-    Print detailed information about a train/test split.
-    
-    Parameters:
-    -----------
-    split_data : dict
-        Output from create_train_test_split
-    """
-    print(f"\n{'='*50}")
-    print(f"Target: {split_data['target_name']}")
-    print(f"{'='*50}")
-    print(f"\nTraining Set:")
-    print(f"  Samples: {split_data['train_size']}")
-    print(f"  Date range: {split_data['train_dates'].min().strftime('%Y-%m')} to {split_data['train_dates'].max().strftime('%Y-%m')}")
-    
-    print(f"\nTest Set:")
-    print(f"  Samples: {split_data['test_size']}")
-    print(f"  Date range: {split_data['test_dates'].min().strftime('%Y-%m')} to {split_data['test_dates'].max().strftime('%Y-%m')}")
-    
-    print(f"\nFeatures: {split_data['n_features']}")
-    print(f"Split date: {split_data['split_date'].strftime('%Y-%m')}")
+# ── CLI ────────────────────────────────────────────────────────────────────
 
-
-# ============================================================
-# MAIN - Run this file to test splitting
-# ============================================================
 if __name__ == "__main__":
-    import os
-    from load_data import load_all_data
-    from feature_eng import prepare_all_model_features
-   
-    os.makedirs('plots', exist_ok=True)
-    
-    data = load_all_data(
-        sfs_path='data/trend_counts_over_time.csv',
-        google_path='data/google_trends.csv',
-        weather_path='data/California_weather.csv'
+    meta = compute_and_save_splits()
+    print_split_summary()
+
+    # Demonstrate get_split() on a few representative series
+    print("\n" + "=" * 65)
+    print("get_split() DEMO — shape check across series types")
+    print("=" * 65)
+
+    demo_ids = [
+        "us_female_outerwear_0",
+        "fr_male_denim_42",
+        "cn_female_dresses_99",
+        "br_male_sportswear_7",
+        "uk_female_bags_50",
+    ]
+    print(f"\n  {'series_id':<35} {'train':>7} {'val':>5} {'test':>6}")
+    print("  " + "-" * 57)
+    for sid in demo_ids:
+        tr, va, te = get_split(sid)
+        print(f"  {sid:<35} {tr.shape[0]:>7} {va.shape[0]:>5} {te.shape[0]:>6}")
+
+    # Verify consistency: all series must have identical split sizes
+    print("\n  Verifying split consistency across all 10 000 series …")
+    train_df, val_df, test_df = get_all_splits()
+    assert train_df.shape[1] == val_df.shape[1] == test_df.shape[1] == 10_000
+    assert train_df.shape[0] + val_df.shape[0] + test_df.shape[0] == len(
+        _load_wide()
+    ), "Split sizes do not sum to total timesteps"
+    print(
+        f"  OK — train {train_df.shape}, val {val_df.shape}, test {test_df.shape}"
     )
-   
-    feature_datasets = prepare_all_model_features(
-        data['sfs'],
-        data['google'],
-        data['weather']
+    print(
+        f"  All {train_df.shape[0] + val_df.shape[0] + test_df.shape[0]} timesteps accounted for."
     )
-    
-    splits = prepare_all_splits(
-        feature_datasets,
-        data['sfs'],
-        train_fraction=0.75,
-        visualize=True,
-        save_plots=True
-    )
-    
-    print_split_info(splits['zara_xgb'])
