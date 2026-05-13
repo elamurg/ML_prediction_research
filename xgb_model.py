@@ -1,426 +1,551 @@
 """
-XGBoost Model
+XGBoost Model — Heuritech F1 Fashion Dataset
 
-This module implements XGBoost for fashion trend prediction.
+One XGBoost model is trained per series on the 221-week history (train + val),
+then evaluated on the 40-week test split using recursive multi-step forecasting.
 
-XGBoost (eXtreme Gradient Boosting) EXPLAINED:
-----------------------------------------------
+Applied to the same 500-series stratified sample as baselines.py:
+  • HERMES trend labels (increasing / flat / declining), seed = 42
+  • ~167 declining / ~167 flat / ~166 increasing
 
-WHAT IS GRADIENT BOOSTING?
-Gradient Boosting is an ensemble method that builds models sequentially.
-Each new model tries to correct the errors of the previous models.
+Feature set (17 features, zero data-leakage by construction):
+  ┌──────────────────┬────────────────────────────────────────────────┐
+  │ Group            │ Features                                       │
+  ├──────────────────┼────────────────────────────────────────────────┤
+  │ Lag              │ lag_1, lag_2, lag_4, lag_8, lag_12             │
+  │ Rolling          │ rmean_4/8/12, rstd_4/8/12  (over t-w … t-1)  │
+  │ Momentum         │ mom_1 = v[t-1]-v[t-2],  mom_4 = v[t-1]-v[t-5]│
+  │ Cyclical calendar│ sin/cos of week-of-year and month-of-year     │
+  └──────────────────┴────────────────────────────────────────────────┘
 
-Think of it like this:
-1. First model makes predictions (probably not great)
-2. Calculate errors (residuals) - where did we go wrong?
-3. Second model learns to predict these errors
-4. Add second model's predictions to improve overall
-5. Repeat many times
+All features at step t are computed exclusively from values observed
+before t (i.e. history[0 … t-1]), so no look-ahead leakage is possible.
+Recursive forecasting extends this discipline to the test horizon:
+at each test step the previous step's prediction is appended to the
+buffer before building the next feature row.
 
-ANALOGY:
-Imagine you're trying to hit a target with darts:
-- First throw: Miss by 10cm to the left
-- Adjustment: Aim 10cm to the right
-- Second throw: Miss by 3cm up
-- Adjustment: Aim 3cm down
-- Each "model" corrects the previous error
-
-THE MATH (simplified):
-----------------------
-Prediction = F_0 + n*h_1 + n*h_2 + ... + n*h_n
-
-Where:
-- F_0 = Initial prediction (usually the mean)
-- h_i = Tree i that predicts residuals
-- n = Learning rate (how much each tree contributes)
-
-WHY USE XGBoost AS BASELINE?
-- Works well with tabular data
-- Doesn't require data normalization
-- Handles non-linear relationships
-- Fast to train
-- Easy to interpret (feature importance)
-
-LIMITATION FOR TIME SERIES:
-XGBoost treats each row independently - it doesn't inherently
-understand that row 10 comes after row 9. That's why we created
-lagged features to encode temporal information.
+SHAP analysis on a 50-series subsample → plots/shap/
+Results → results/xgboost_results.csv
 """
 
+import json
+import os
+import time
+import warnings
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import shap
 import xgboost as xgb
-import matplotlib.pyplot as plt
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from typing import Dict, Tuple, List
-import warnings
-warnings.filterwarnings('ignore')
+from sklearn.metrics import mean_squared_error, r2_score
+from tqdm import tqdm
+
+warnings.filterwarnings("ignore")
+
+# ── Paths & constants ──────────────────────────────────────────────────────
+PARQUET     = "data/f1_fashion/f1_cleaned.parquet"
+SPLITS_JSON = "data/f1_fashion/splits.json"
+RESULTS_DIR = "results"
+RESULTS_CSV = os.path.join(RESULTS_DIR, "xgboost_results.csv")
+SHAP_DIR    = "plots/shap"
+
+SEED      = 42
+N_SAMPLE  = 500
+N_SHAP    = 50
+FREQ      = 52
+THRESHOLD = 0.05
+
+# ── Feature specification ──────────────────────────────────────────────────
+LAG_FEATS      = ["lag_1", "lag_2", "lag_4", "lag_8", "lag_12"]
+ROLLING_FEATS  = ["rmean_4", "rmean_8", "rmean_12",
+                  "rstd_4",  "rstd_8",  "rstd_12"]
+MOMENTUM_FEATS = ["mom_1", "mom_4"]
+CALENDAR_FEATS = ["sin_week", "cos_week", "sin_month", "cos_month"]
+FEATURE_NAMES  = LAG_FEATS + ROLLING_FEATS + MOMENTUM_FEATS + CALENDAR_FEATS
+
+FEATURE_GROUPS = {
+    "lag":      LAG_FEATS,
+    "rolling":  ROLLING_FEATS,
+    "momentum": MOMENTUM_FEATS,
+    "calendar": CALENDAR_FEATS,
+}
+
+# ── XGBoost hyperparameters ────────────────────────────────────────────────
+# Conservative depth (3) and high shrinkage (lr=0.05) to guard against
+# overfitting on the ~209-row training window per series.
+XGB_PARAMS = dict(
+    objective        = "reg:squarederror",
+    n_estimators     = 300,
+    max_depth        = 3,
+    learning_rate    = 0.05,
+    subsample        = 0.8,
+    colsample_bytree = 0.8,
+    min_child_weight = 2,
+    random_state     = SEED,
+    verbosity        = 0,
+    tree_method      = "hist",   # fast CPU solver
+)
 
 
-class XGBoostForecaster:
-    """
-    XGBoost model wrapper for fashion trend forecasting.
-    
-    This class encapsulates:
-    - Model training with hyperparameter tuning
-    - Prediction
-    - Evaluation
-    - Feature importance analysis
-    """
-    
-    def __init__(self, params: Dict = None):
-        """
-        Initialize the XGBoost forecaster.
-        
-        Default parameters are tuned for small time series datasets.
-        
-        HYPERPARAMETER EXPLANATIONS:
-        ----------------------------
-        n_estimators: Number of trees (100)
-            More trees = more complex model, but slower
-            Too many = overfitting, too few = underfitting
-        
-        max_depth: Maximum tree depth (4)
-            Controls how complex each tree can be
-            Deeper = can learn more complex patterns
-            Too deep = overfitting
-        
-        learning_rate: Step size (0.1)
-            How much each tree contributes
-            Smaller = slower learning but often better
-            Larger = faster but might overshoot
-        
-        subsample: Fraction of data per tree (0.8)
-            Random sampling prevents overfitting
-            1.0 = use all data (risk overfitting)
-            0.8 = use 80% of data per tree
-        
-        colsample_bytree: Fraction of features per tree (0.8)
-            Random feature selection per tree
-            Adds diversity to ensemble
-        
-        min_child_weight: Minimum samples in leaf (3)
-            Prevents trees from creating very specific rules
-            Higher = more conservative, less overfitting
-        """
-        self.default_params = {
-            'objective': 'reg:squarederror',
-            'n_estimators': 100,
-            'max_depth': 4,
-            'learning_rate': 0.1,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'min_child_weight': 3,
-            'random_state': 42,
-            'verbosity': 0
-        }
-        
-        self.params = params if params else self.default_params
-        self.model = None
-        self.feature_names = None
-    
-    def train(self, X_train: pd.DataFrame, y_train: pd.Series,
-              X_val: pd.DataFrame = None, y_val: pd.Series = None) -> 'XGBoostForecaster':
-        """
-        Train the XGBoost model.
-        
-        TRAINING PROCESS:
-        -----------------
-        1. Initialize model with parameters
-        2. For each boosting round:
-           a. Current predictions on training data
-           b. Calculate residuals (errors)
-           c. Fit new tree to predict residuals
-           d. Update predictions
-           e. Check validation performance
-        3. Stop early if validation doesn't improve
-        """
-        self.feature_names = list(X_train.columns)
-        
-        self.model = xgb.XGBRegressor(**self.params)
-        
-        eval_set = [(X_train, y_train)]
-        if X_val is not None and y_val is not None:
-            eval_set.append((X_val, y_val))
+# ── Data helpers ───────────────────────────────────────────────────────────
 
-        self.model.fit(
-            X_train, y_train,
-            eval_set=eval_set,
-            verbose=False
-        )
-        
-        return self
-    
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
-        """Make predictions with trained model."""
-        if self.model is None:
-            raise ValueError("Model not trained. Call train() first.")
-        return self.model.predict(X)
-    
-    def evaluate(self, X: pd.DataFrame, y: pd.Series) -> Dict:
-        """
-        Evaluate model performance.
-        
-        METRICS EXPLAINED:
-        ------------------
-        RMSE (Root Mean Squared Error):
-            sqrt(mean((actual - predicted)^2))
-            - In same units as target
-            - Penalizes large errors more
-            - Lower is better
-        
-        MAE (Mean Absolute Error):
-            mean(|actual - predicted|)
-            - In same units as target
-            - Equal weight to all errors
-            - Lower is better
-        
-        R2 (R-squared / Coefficient of Determination):
-            1 - (SS_residual / SS_total)
-            - Range: -inf to 1
-            - 1.0 = perfect prediction
-            - 0.0 = predicts mean only
-            - Negative = worse than mean
-        
-        MAPE (Mean Absolute Percentage Error):
-            mean(|actual - predicted| / |actual|) * 100
-            - Percentage error
-            - Good for comparing across different scales
-        """
-        predictions = self.predict(X)
-        
-        rmse = np.sqrt(mean_squared_error(y, predictions))
-        mae = mean_absolute_error(y, predictions)
-        r2 = r2_score(y, predictions)
-        
-        mask = y != 0
-        if mask.sum() > 0:
-            mape = np.mean(np.abs((y[mask] - predictions[mask]) / y[mask])) * 100
-        else:
-            mape = np.nan
-        
-        return {
-            'rmse': rmse,
-            'mae': mae,
-            'r2': r2,
-            'mape': mape,
-            'predictions': predictions
-        }
-    
-    def get_feature_importance(self) -> pd.DataFrame:
-        """
-        Get feature importance rankings.
-        
-        WHY FEATURE IMPORTANCE MATTERS:
-        - Understand what drives predictions
-        - Identify most valuable features
-        - Guide feature engineering
-        - Validate domain knowledge
-        """
-        if self.model is None:
-            raise ValueError("Model not trained.")
-        
-        importance = self.model.feature_importances_
-        
-        df = pd.DataFrame({
-            'feature': self.feature_names,
-            'importance': importance
-        })
-        
-        df = df.sort_values('importance', ascending=False).reset_index(drop=True)
-        df['rank'] = range(1, len(df) + 1)
-        
-        return df
-    
-    def plot_feature_importance(self, top_n: int = 15, 
-                                title: str = None,
-                                save_path: str = None):
-        """Visualize feature importance."""
-        importance_df = self.get_feature_importance()
-        top_features = importance_df.head(top_n)
-        
-        fig, ax = plt.subplots(figsize=(10, 6))
-        
-        bars = ax.barh(range(top_n), 
-                      top_features['importance'].values[::-1],
-                      color='#457B9D')
-        
-        ax.set_yticks(range(top_n))
-        ax.set_yticklabels(top_features['feature'].values[::-1])
-        ax.set_xlabel('Feature Importance')
-        
-        if title:
-            ax.set_title(title, fontsize=14, fontweight='bold')
-        
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            print(f"Saved: {save_path}")
-        
-        plt.show()
-        
-        return importance_df
+def _load_data():
+    """Return (history_df, test_df, meta) wide DataFrames."""
+    with open(SPLITS_JSON) as fh:
+        meta = json.load(fh)
+
+    idx     = meta["indices"]
+    df_long = pd.read_parquet(PARQUET)
+    main    = df_long[df_long["signal"] == "main"]
+    wide    = main.pivot(index="date", columns="series_id", values="value")
+    wide.index = pd.to_datetime(wide.index)
+    wide    = wide.sort_index()
+
+    train_df  = wide.iloc[idx["train_start"] : idx["train_end"]]
+    val_df    = wide.iloc[idx["val_start"]   : idx["val_end"]]
+    test_df   = wide.iloc[idx["test_start"]  : idx["test_end"]]
+    history_df = pd.concat([train_df, val_df])   # 221 weeks
+    return history_df, test_df, meta
 
 
-def train_and_evaluate_xgboost(split_data: Dict, 
-                               model_name: str = "XGBoost") -> Dict:
-    """
-    Complete XGBoost training and evaluation pipeline.
-    """
-    print(f"\n{'='*60}")
-    print(f"TRAINING {model_name.upper()}")
-    print(f"{'='*60}")
-    
-    X_train = split_data['X_train']
-    y_train = split_data['y_train']
-    X_test = split_data['X_test']
-    y_test = split_data['y_test']
-    
-    print(f"\nTraining samples: {len(X_train)}")
-    print(f"Test samples: {len(X_test)}")
-    print(f"Features: {len(X_train.columns)}")
+def _series_meta(series_id: str) -> dict:
+    market, gender, category, n = series_id.split("_", 3)
+    return dict(market=market, gender=gender, category=category, n=int(n))
 
-    model = XGBoostForecaster()
-    model.train(X_train, y_train, X_test, y_test)
 
-    print("\n--- Training Performance ---")
-    train_metrics = model.evaluate(X_train, y_train)
-    print(f"  RMSE: {train_metrics['rmse']:.2f}")
-    print(f"  MAE:  {train_metrics['mae']:.2f}")
-    print(f"  R2:   {train_metrics['r2']:.3f}")
- 
-    print("\n--- Test Performance ---")
-    test_metrics = model.evaluate(X_test, y_test)
-    print(f"  RMSE: {test_metrics['rmse']:.2f}")
-    print(f"  MAE:  {test_metrics['mae']:.2f}")
-    print(f"  R2:   {test_metrics['r2']:.3f}")
-    print(f"  MAPE: {test_metrics['mape']:.1f}%")
- 
-    print("\n--- Overfitting Check ---")
-    rmse_diff = test_metrics['rmse'] - train_metrics['rmse']
-    if rmse_diff > train_metrics['rmse'] * 0.5:
-        print(f"  WARNING: Possible overfitting (test RMSE >> train RMSE)")
-    else:
-        print(f"  OK: Model generalizes reasonably well")
-    
+# ── HERMES trend labels & stratified sample ────────────────────────────────
+
+def _compute_trend_labels(history_df: pd.DataFrame) -> pd.Series:
+    """YoY classification: 1=increasing, 0=flat, -1=declining."""
+    last = history_df.iloc[-FREQ:]
+    prev = history_df.iloc[-2 * FREQ : -FREQ]
+    yoy  = ((last.mean() - prev.mean()) / prev.mean().replace(0, np.nan)).fillna(0)
+    return (yoy > THRESHOLD).astype(int) - (yoy < -THRESHOLD).astype(int)
+
+
+def _stratified_sample(labels: pd.Series, n: int = N_SAMPLE,
+                       seed: int = SEED) -> list:
+    """Balanced draw across HERMES trend classes (same logic as baselines.py)."""
+    rng     = np.random.default_rng(seed)
+    classes = sorted(labels.unique())
+    base    = n // len(classes)
+    extra   = n  % len(classes)
+    sampled = []
+    for i, cls in enumerate(classes):
+        pool   = labels[labels == cls].index.tolist()
+        k      = min(base + (1 if i < extra else 0), len(pool))
+        sampled.extend(rng.choice(pool, size=k, replace=False).tolist())
+    return sampled
+
+
+# ── Feature engineering ────────────────────────────────────────────────────
+
+def _cyclical_calendar(dates: pd.DatetimeIndex) -> dict:
+    """Return sin/cos encodings for week-of-year and month."""
+    week = dates.isocalendar().week.astype(float).values
+    mon  = dates.month.astype(float).values
     return {
-        'model': model,
-        'train_metrics': train_metrics,
-        'test_metrics': test_metrics,
-        'train_predictions': train_metrics['predictions'],
-        'test_predictions': test_metrics['predictions'],
-        'X_train': X_train,
-        'y_train': y_train,
-        'X_test': X_test,
-        'y_test': y_test,
-        'train_dates': split_data['train_dates'],
-        'test_dates': split_data['test_dates']
+        "sin_week":  np.sin(2 * np.pi * week / 52),
+        "cos_week":  np.cos(2 * np.pi * week / 52),
+        "sin_month": np.sin(2 * np.pi * mon  / 12),
+        "cos_month": np.cos(2 * np.pi * mon  / 12),
     }
 
 
-def plot_predictions(results: Dict, 
-                    title: str = None,
-                    save_path: str = None):
-    """Visualize actual vs predicted values."""
-    fig, ax = plt.subplots(figsize=(14, 6))
+def build_train_features(
+    values: np.ndarray,
+    dates: pd.DatetimeIndex,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """
+    Construct (X, y) for all positions in `values`, then drop NaN rows.
 
-    ax.plot(results['train_dates'], results['y_train'],
-            color='#2A9D8F', linewidth=2, label='Training (Actual)')
- 
-    ax.plot(results['test_dates'], results['y_test'],
-            color='#457B9D', linewidth=2, label='Test (Actual)')
+    Features for predicting value[t] are built from value[0 … t-1]:
+      • lag_k        = value[t-k]
+      • rmean_w      = mean(value[t-w … t-1])   (shift-1 then rolling)
+      • rstd_w       = std (value[t-w … t-1])
+      • mom_1        = value[t-1] − value[t-2]
+      • mom_4        = value[t-1] − value[t-5]
+      • calendar     = sin/cos of ISO week and calendar month
 
-    ax.plot(results['test_dates'], results['test_predictions'],
-            color='#E63946', linewidth=2, linestyle='--', 
-            label='Test (Predicted)', marker='o', markersize=4)
+    The first 12 rows are dropped because lag_12 is undefined there.
+    All rolling windows use shift(1) first so they never touch the
+    current-step value being predicted.
+    """
+    s = pd.Series(values, index=dates)
+    f = pd.DataFrame(index=dates)
 
-    split_date = results['train_dates'][-1]
-    ax.axvline(x=split_date, color='black', linestyle='--', 
-               alpha=0.5, label='Train/Test Split')
-    
-    if title:
-        ax.set_title(title, fontsize=14, fontweight='bold')
-    ax.set_xlabel('Date')
-    ax.set_ylabel('Frequency')
-    ax.legend(loc='best')
-    ax.grid(True, alpha=0.3)
-    
+    for k in [1, 2, 4, 8, 12]:
+        f[f"lag_{k}"] = s.shift(k)
+
+    s1 = s.shift(1)   # values ending at t-1 (no leakage)
+    for w in [4, 8, 12]:
+        f[f"rmean_{w}"] = s1.rolling(w, min_periods=1).mean()
+        f[f"rstd_{w}"]  = s1.rolling(w, min_periods=2).std().fillna(0.0)
+
+    f["mom_1"] = s.shift(1) - s.shift(2)
+    f["mom_4"] = s.shift(1) - s.shift(5)
+
+    cal = _cyclical_calendar(dates)
+    for name, arr in cal.items():
+        f[name] = arr
+
+    f["_target"] = values
+    f = f.dropna(subset=FEATURE_NAMES)   # drops first 12 rows
+
+    return f[FEATURE_NAMES], f["_target"]
+
+
+def _feature_row(buf: list, t: int, date: pd.Timestamp) -> np.ndarray:
+    """
+    Compute a single feature row for recursive forecasting.
+
+    `buf` contains all values observed up to (but not including) position t;
+    `date` is the calendar date at position t.
+
+    Exactly mirrors the pandas version in build_train_features so models
+    see the same feature distribution during prediction as during training.
+    """
+    row = np.empty(len(FEATURE_NAMES), dtype=float)
+    i = 0
+
+    # Lag features
+    for k in [1, 2, 4, 8, 12]:
+        row[i] = buf[t - k] if t - k >= 0 else np.nan
+        i += 1
+
+    # Rolling mean (last w values ending at t-1)
+    for w in [4, 8, 12]:
+        window = buf[max(0, t - w): t]
+        row[i] = float(np.mean(window)) if window else np.nan
+        i += 1
+
+    # Rolling std (last w values ending at t-1)
+    for w in [4, 8, 12]:
+        window = buf[max(0, t - w): t]
+        row[i] = float(np.std(window, ddof=1)) if len(window) > 1 else 0.0
+        i += 1
+
+    # Momentum
+    row[i]     = buf[t-1] - buf[t-2] if t >= 2 else np.nan;  i += 1
+    row[i]     = buf[t-1] - buf[t-5] if t >= 5 else np.nan;  i += 1
+
+    # Cyclical calendar
+    ts   = pd.Timestamp(date)
+    week = float(ts.isocalendar()[1])
+    mon  = float(ts.month)
+    row[i] = np.sin(2 * np.pi * week / 52);  i += 1
+    row[i] = np.cos(2 * np.pi * week / 52);  i += 1
+    row[i] = np.sin(2 * np.pi * mon  / 12);  i += 1
+    row[i] = np.cos(2 * np.pi * mon  / 12)
+
+    return row
+
+
+# ── Training & recursive forecasting ──────────────────────────────────────
+
+def train_xgb(X: pd.DataFrame, y: pd.Series) -> xgb.XGBRegressor:
+    """Fit an XGBRegressor on the provided feature / target matrix."""
+    model = xgb.XGBRegressor(**XGB_PARAMS)
+    model.fit(X, y, verbose=False)
+    return model
+
+
+def recursive_forecast(
+    model: xgb.XGBRegressor,
+    history: np.ndarray,
+    history_dates: pd.DatetimeIndex,
+    test_dates: pd.DatetimeIndex,
+) -> tuple[np.ndarray, pd.DataFrame]:
+    """
+    Predict `len(test_dates)` steps ahead from the end of history.
+
+    At each step the current prediction is appended to the buffer so
+    that subsequent feature rows can reference it as a lagged value.
+    This mirrors the real-world deployment scenario where future
+    observations are unavailable.
+
+    Returns
+    -------
+    preds      : (n_test,) predicted values
+    X_test_rec : (n_test, n_features) feature matrix used for each step
+    """
+    buf        = list(history)
+    all_dates  = list(history_dates) + list(test_dates)
+    preds      = []
+    feat_rows  = []
+
+    for step in range(len(test_dates)):
+        t   = len(buf)
+        row = _feature_row(buf, t, all_dates[t])
+        feat_rows.append(row)
+        pred = float(model.predict(row.reshape(1, -1))[0])
+        preds.append(pred)
+        buf.append(pred)
+
+    X_test_rec = pd.DataFrame(feat_rows, index=test_dates,
+                              columns=FEATURE_NAMES)
+    return np.array(preds), X_test_rec
+
+
+# ── SHAP analysis ──────────────────────────────────────────────────────────
+
+def run_shap_analysis(
+    models:        dict,          # {series_id: XGBRegressor}
+    test_features: dict,          # {series_id: pd.DataFrame shape (40, 17)}
+    shap_ids:      list,          # 50-series subsample
+    labels:        pd.Series,
+    save_dir:      str = SHAP_DIR,
+) -> None:
+    """
+    SHAP analysis on a 50-series subsample.
+
+    Strategy: pool SHAP values across the 50 models (50 × 40 = 2 000 rows)
+    to obtain global feature importance estimates.  All models share the
+    same feature set so pooling is valid.
+
+    Plots produced
+    --------------
+    01_beeswarm.png         Global beeswarm summary (all features)
+    02_feature_groups.png   Mean |SHAP| per feature group (bar chart)
+    03_dependence.png       Dependence plot for the top-ranked feature
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    print(f"\n  Computing SHAP values for {len(shap_ids)} series …")
+
+    all_shap_vals = []
+    all_feat_vals = []
+
+    for sid in tqdm(shap_ids, ncols=80, leave=False):
+        model   = models[sid]
+        X_test  = test_features[sid].values.astype(float)
+
+        explainer  = shap.TreeExplainer(model)
+        shap_vals  = explainer.shap_values(X_test)   # (40, 17)
+        all_shap_vals.append(shap_vals)
+        all_feat_vals.append(X_test)
+
+    sv = np.vstack(all_shap_vals)   # (2000, 17)
+    fv = np.vstack(all_feat_vals)   # (2000, 17)
+    fv_df = pd.DataFrame(fv, columns=FEATURE_NAMES)
+
+    mean_abs = np.abs(sv).mean(axis=0)   # (17,)
+    top_feat_idx  = int(np.argmax(mean_abs))
+    top_feat_name = FEATURE_NAMES[top_feat_idx]
+
+    # ── Plot 1: beeswarm summary ─────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(10, 7))
+    shap.summary_plot(
+        sv, fv_df,
+        feature_names=FEATURE_NAMES,
+        plot_type="dot",
+        show=False,
+        max_display=17,
+    )
+    plt.title(
+        f"Global SHAP beeswarm — XGBoost on F1 dataset\n"
+        f"({len(shap_ids)} series × 40 test steps = {len(sv):,} instances)",
+        fontsize=11,
+    )
     plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Saved: {save_path}")
-    
-    plt.show()
+    _save_fig(plt.gcf(), save_dir, "01_beeswarm.png")
+
+    # ── Plot 2: mean |SHAP| per feature group ───────────────────────────
+    group_scores = {}
+    for group, feats in FEATURE_GROUPS.items():
+        idxs = [FEATURE_NAMES.index(f) for f in feats]
+        group_scores[group] = float(np.abs(sv[:, idxs]).mean())
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    groups = list(group_scores.keys())
+    scores = [group_scores[g] for g in groups]
+    colors = ["#457b9d", "#2a9d8f", "#e9c46a", "#e76f51"]
+    bars   = ax.barh(groups, scores, color=colors, edgecolor="white")
+    ax.set_xlabel("Mean |SHAP value|", fontsize=11)
+    ax.set_title("Feature group importance — mean |SHAP| per group", fontsize=12)
+    for bar, v in zip(bars, scores):
+        ax.text(v + 0.0005, bar.get_y() + bar.get_height() / 2,
+                f"{v:.4f}", va="center", fontsize=9)
+    plt.tight_layout()
+    _save_fig(fig, save_dir, "02_feature_groups.png")
+
+    # ── Plot 3: dependence plot for top feature ──────────────────────────
+    fig, ax = plt.subplots(figsize=(8, 5))
+    shap.dependence_plot(
+        top_feat_idx,
+        sv,
+        fv_df,
+        feature_names=FEATURE_NAMES,
+        ax=ax,
+        show=False,
+    )
+    ax.set_title(
+        f"SHAP dependence — {top_feat_name}  "
+        f"(mean |SHAP| = {mean_abs[top_feat_idx]:.4f})",
+        fontsize=11,
+    )
+    plt.tight_layout()
+    _save_fig(fig, save_dir, "03_dependence.png")
+
+    # ── Print feature ranking ────────────────────────────────────────────
+    print(f"\n  Top-10 features by mean |SHAP| (pooled across {len(shap_ids)} models):")
+    ranking = sorted(zip(FEATURE_NAMES, mean_abs), key=lambda x: -x[1])
+    for rank, (name, score) in enumerate(ranking[:10], 1):
+        group = next(g for g, fs in FEATURE_GROUPS.items() if name in fs)
+        print(f"    {rank:>2}. {name:<14}  {score:.5f}  [{group}]")
+
+    print(f"\n  Top feature: {top_feat_name}")
+    print(f"  Group importance: " +
+          "  ".join(f"{g}={v:.4f}" for g, v in group_scores.items()))
 
 
-# ============================================================
-# MAIN - Run this file to train XGBoost models
-# ============================================================
+# ── Summary table ──────────────────────────────────────────────────────────
+
+def _print_summary(results_df: pd.DataFrame) -> None:
+    sep = "=" * 65
+    print(f"\n{sep}")
+    print("XGBOOST RESULTS SUMMARY")
+    print(sep)
+
+    overall = results_df.agg({"rmse": ["mean", "median", "std"],
+                               "r2":   ["mean", "median"]})
+    print(f"\n  {'Metric':<12}  {'Mean':>8}  {'Median':>8}  {'Std':>8}")
+    print("  " + "-" * 40)
+    print(f"  {'RMSE':<12}  {overall.loc['mean','rmse']:>8.4f}  "
+          f"{overall.loc['median','rmse']:>8.4f}  "
+          f"{overall.loc['std','rmse']:>8.4f}")
+    print(f"  {'R²':<12}  {overall.loc['mean','r2']:>8.4f}  "
+          f"{overall.loc['median','r2']:>8.4f}  {'—':>8}")
+
+    print(f"\n  {'Trend label':<14}  {'N':>5}  {'RMSE mean':>10}  {'R² mean':>8}")
+    print("  " + "-" * 42)
+    for label in ["increasing", "flat", "declining"]:
+        sub = results_df[results_df["trend_label"] == label]
+        if len(sub):
+            print(f"  {label:<14}  {len(sub):>5}  "
+                  f"{sub['rmse'].mean():>10.4f}  {sub['r2'].mean():>8.4f}")
+
+    # Comparison against baseline floor
+    baseline_rmse = 0.0724   # seasonal naive on same 500-series sample
+    xgb_rmse      = results_df["rmse"].mean()
+    beat = xgb_rmse < baseline_rmse
+    print(f"\n  Baseline floor (seasonal naive, same sample): RMSE = {baseline_rmse:.4f}")
+    print(f"  XGBoost mean RMSE                           : RMSE = {xgb_rmse:.4f}")
+    print(f"  {'✓ Beats baseline' if beat else '✗ Does NOT beat baseline'}")
+    print(sep)
+
+
+def _save_fig(fig: plt.Figure, directory: str, filename: str) -> None:
+    path = os.path.join(directory, filename)
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"    Saved: {path}")
+
+
+# ── Main pipeline ──────────────────────────────────────────────────────────
+
+def run_xgboost(
+    parquet_path: str = PARQUET,
+    splits_path:  str = SPLITS_JSON,
+    results_path: str = RESULTS_CSV,
+    n_sample:     int = N_SAMPLE,
+    n_shap:       int = N_SHAP,
+    seed:         int = SEED,
+) -> pd.DataFrame:
+    """
+    Full XGBoost pipeline:
+      1. Load data, compute trend labels, draw stratified 500-series sample
+      2. Train one XGBRegressor per series on 221-week history
+      3. Predict test split (40 weeks) via recursive forecasting
+      4. Evaluate (RMSE, R²) and save results/xgboost_results.csv
+      5. SHAP analysis on first `n_shap` series from the sample
+    """
+    print("=" * 65)
+    print("XGBOOST MODEL — F1 Fashion Dataset")
+    print("=" * 65)
+
+    # ── Load ─────────────────────────────────────────────────────────────
+    print("\nLoading data …")
+    history_df, test_df, meta = _load_data()
+    n_test = len(test_df)
+    print(f"  History  : {len(history_df)} weeks (train + val)")
+    print(f"  Test     : {n_test} weeks")
+    print(f"  Series   : {history_df.shape[1]:,}")
+
+    # ── Trend labels + sample ─────────────────────────────────────────────
+    labels     = _compute_trend_labels(history_df)
+    sample_ids = _stratified_sample(labels, n=n_sample, seed=seed)
+    lc = labels[sample_ids].value_counts().sort_index()
+    print(f"\nSample: {len(sample_ids)} series  "
+          f"(declining={lc.get(-1,0)}, flat={lc.get(0,0)}, "
+          f"increasing={lc.get(1,0)})")
+
+    label_name = {1: "increasing", 0: "flat", -1: "declining"}
+
+    # ── Train + predict loop ──────────────────────────────────────────────
+    print(f"\nTraining {n_sample} XGBoost models …")
+    t0       = time.perf_counter()
+    rows     = []
+    models   = {}
+    test_feats = {}
+
+    for sid in tqdm(sample_ids, ncols=80):
+        h_vals  = history_df[sid].to_numpy(float)
+        h_dates = history_df.index
+        t_vals  = test_df[sid].to_numpy(float)
+        t_dates = test_df.index
+
+        # Build training features (209 rows after NaN drop)
+        X_train, y_train = build_train_features(h_vals, h_dates)
+
+        # Fit model
+        model = train_xgb(X_train, y_train)
+
+        # Recursive forecast + collect test feature rows for SHAP
+        preds, X_test_rec = recursive_forecast(model, h_vals, h_dates, t_dates)
+
+        # Metrics
+        rmse = float(np.sqrt(mean_squared_error(t_vals, preds)))
+        r2   = float(r2_score(t_vals, preds))
+
+        m = _series_meta(sid)
+        rows.append({
+            "series_id":   sid,
+            "market":      m["market"],
+            "gender":      m["gender"],
+            "category":    m["category"],
+            "trend_label": label_name[int(labels[sid])],
+            "n_train":     len(X_train),
+            "rmse":        rmse,
+            "r2":          r2,
+        })
+        models[sid]     = model
+        test_feats[sid] = X_test_rec
+
+    elapsed = time.perf_counter() - t0
+    print(f"  Done in {elapsed:.1f}s  ({elapsed/n_sample:.2f}s / series)")
+
+    # ── Save results ──────────────────────────────────────────────────────
+    results_df = pd.DataFrame(rows)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    results_df.to_csv(results_path, index=False)
+    print(f"\nSaved → {results_path}  ({len(results_df)} rows)")
+
+    # ── Summary ────────────────────────────────────────────────────────────
+    _print_summary(results_df)
+
+    # ── SHAP analysis ─────────────────────────────────────────────────────
+    # Take every 10th series from the stratified sample to preserve balance
+    shap_ids = sample_ids[::10][:n_shap]
+    print(f"\n[SHAP] Analysing {len(shap_ids)}-series subsample …")
+    run_shap_analysis(models, test_feats, shap_ids, labels)
+
+    return results_df
+
+
+# ── CLI ────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    import os
-    from load_data import load_all_data
-    from feature_eng import prepare_all_model_features
-    from train_test import prepare_all_splits
-    
-    os.makedirs('plots', exist_ok=True)
-    
-    print("Loading data...")
-    data = load_all_data(
-        sfs_path='data/trend_counts_over_time.csv',
-        google_path='data/google_trends.csv',
-        weather_path='data/California_weather.csv'
-    )
-    
-    print("\nCreating features...")
-    feature_datasets = prepare_all_model_features(
-        data['sfs'], data['google'], data['weather']
-    )
- 
-    print("\nCreating train/test splits...")
-    splits = prepare_all_splits(
-        feature_datasets, data['sfs'],
-        train_fraction=0.75, visualize=False, save_plots=False
-    )
-    
-    zara_results = train_and_evaluate_xgboost(
-        splits['zara_xgb'], model_name="Zara XGBoost (SFS only)"
-    )
-    
-    plot_predictions(zara_results,
-        title='Zara Dress: XGBoost Predictions vs Actual',
-        save_path='plots/zara_xgb_predictions.png'
-    )
-    
-    zara_results['model'].plot_feature_importance(
-        top_n=15, title='Zara Dress: XGBoost Feature Importance',
-        save_path='plots/zara_xgb_importance.png'
-    )
-    
-    # Debug: Check for inf values
-    import numpy as np
-    X_train = splits['chanel_xgb']['X_train']
-    inf_mask = np.isinf(X_train)
-    print(f"Total inf values: {inf_mask.sum().sum()}")
-    print(f"Columns with inf: {X_train.columns[inf_mask.any()].tolist()}")
-    
-    chanel_results = train_and_evaluate_xgboost(
-        splits['chanel_xgb'], model_name="Chanel XGBoost (SFS only)"
-    )
-    
-    plot_predictions(chanel_results,
-        title='Chanel Bag: XGBoost Predictions vs Actual',
-        save_path='plots/chanel_xgb_predictions.png'
-    )
-    
-    chanel_results['model'].plot_feature_importance(
-        top_n=15, title='Chanel Bag: XGBoost Feature Importance',
-        save_path='plots/chanel_xgb_importance.png'
-    )
-    
-    print("\n" + "="*60)
-    print("XGBOOST SUMMARY")
-    print("="*60)
-    print(f"\nZara:   Test RMSE={zara_results['test_metrics']['rmse']:.2f}, R2={zara_results['test_metrics']['r2']:.3f}")
-    print(f"Chanel: Test RMSE={chanel_results['test_metrics']['rmse']:.2f}, R2={chanel_results['test_metrics']['r2']:.3f}")
+    run_xgboost()
