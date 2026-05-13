@@ -52,8 +52,11 @@ Thumbs.db
 
 # Project outputs (optional - uncomment if you want to ignore)
 # plots/
-# results/
 # models/
+
+# results/ CSVs are tracked (baseline/evaluation outputs for reproducibility)
+!results/
+!results/*.csv
 
 # PyTorch
 *.pt
